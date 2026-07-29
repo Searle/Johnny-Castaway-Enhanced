@@ -12,3 +12,5 @@ tools
 *.exe
 *.scr
 .vscode
+Raylib-Go-Wasm/
+wasmtest/
