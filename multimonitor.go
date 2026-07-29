@@ -119,6 +119,24 @@ func setupMonitors() {
 	}
 }
 
+// refreshWindowedRect sets monitorRects to a single rectangle covering the
+// current window (in window-local coordinates). grUpdateDisplay letterboxes
+// the 4:3 scene into it, so calling this each frame keeps the scene correctly
+// fitted while the user resizes the window. Used only in windowed mode.
+func refreshWindowedRect() {
+	w := float32(rl.GetRenderWidth())
+	h := float32(rl.GetRenderHeight())
+	if w <= 0 || h <= 0 {
+		w, h = float32(rl.GetScreenWidth()), float32(rl.GetScreenHeight())
+	}
+	if len(monitorRects) == 1 &&
+		monitorRects[0].X == 0 && monitorRects[0].Y == 0 &&
+		monitorRects[0].W == w && monitorRects[0].H == h {
+		return // unchanged
+	}
+	monitorRects = []TMonitorRect{{X: 0, Y: 0, W: w, H: h}}
+}
+
 func absf(v float32) float32 {
 	if v < 0 {
 		return -v

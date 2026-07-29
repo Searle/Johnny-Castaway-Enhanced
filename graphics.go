@@ -667,6 +667,12 @@ func grUpdateDisplay(
 	ttmHolidayThread *TTtmThread,
 	ttmCloudsThread *TTtmThread,
 ) {
+	// In windowed mode, refresh the single full-window rect each frame so the
+	// letterboxed scene keeps fitting while the user resizes the window.
+	if windowedMode {
+		refreshWindowedRect()
+	}
+
 	// r.c. - compute one letterboxed (4:3) destination rect per connected
 	// monitor instead of one for the whole (now possibly multi-monitor-
 	// spanning) window, so the same scene is drawn correctly centered on

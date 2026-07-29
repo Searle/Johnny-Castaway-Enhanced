@@ -28,6 +28,13 @@ var (
 	hasMonitorIndex   bool
 	buildTime         = "Developer Build"
 	isRun             = false
+
+	// Windowed mode: a normal decorated, resizable window instead of the
+	// borderless monitor-spanning screensaver window. Enabled by -window WxH
+	// (e.g. -window 1280x960). The scene is letterboxed (4:3) to fit.
+	windowedMode bool
+	windowedW    = 1280
+	windowedH    = 960
 )
 
 func formatStartTime(val int) string {
@@ -443,6 +450,17 @@ func main() {
 		} else if strings.HasPrefix(argLower, "/k") || strings.HasPrefix(argLower, "-k") {
 			// -k enables debug hotkeys: Space=pause, M=max-speed, Enter=advance, Esc=quit
 			hotKeysEnabled = true
+		} else if argLower == "/window" || argLower == "-window" || argLower == "-w" || argLower == "/w" {
+			// -window [WxH]: run in a normal decorated, resizable window.
+			// An optional WxH (e.g. 1280x960) sets the initial size; the scene
+			// is letterboxed to 4:3 inside it. Defaults to 1280x960.
+			windowedMode = true
+			if i+1 < len(os.Args) {
+				var w, h int
+				if n, _ := fmt.Sscanf(os.Args[i+1], "%dx%d", &w, &h); n == 2 && w > 0 && h > 0 {
+					windowedW, windowedH = w, h
+				}
+			}
 		} else if strings.HasPrefix(argLower, "/m") || strings.HasPrefix(argLower, "-m") {
 			if i+1 < len(os.Args) {
 				fmt.Sscanf(os.Args[i+1], "%d", &runOnMonitorIndex)
@@ -483,21 +501,40 @@ func setupApp() {
 
 	preferX11Backend()
 
-	// Enable 4x MSAA, undecorated, and resizable window flags before initialization to ensure window focus
-	rl.SetConfigFlags(rl.FlagMsaa4xHint | rl.FlagWindowUndecorated | rl.FlagWindowResizable)
-	rl.InitWindow(screenWidth, screenHeight, "Johnny Castaway")
+	if windowedMode {
+		// Normal decorated, resizable window. The scene is letterboxed to fit,
+		// and the window is not treated as a screensaver (no exit-on-input).
+		isScreensaverMode = false
+		rl.SetConfigFlags(rl.FlagMsaa4xHint | rl.FlagWindowResizable)
+		rl.InitWindow(int32(windowedW), int32(windowedH), "Johnny Castaway")
+	} else {
+		// Enable 4x MSAA, undecorated, and resizable window flags before initialization to ensure window focus
+		rl.SetConfigFlags(rl.FlagMsaa4xHint | rl.FlagWindowUndecorated | rl.FlagWindowResizable)
+		rl.InitWindow(screenWidth, screenHeight, "Johnny Castaway")
+	}
 
 	if !rl.IsWindowReady() {
 		panic("Fatal: Failed to initialize window. Please check your OpenGL/graphics drivers.")
 	}
 
-	// r.c. - spans the window across every connected monitor (not just the
-	// current one) and records each monitor's own rectangle for the
-	// renderer to draw a separate copy of the scene into. On a
-	// single-monitor system this behaves exactly like the previous code.
-	setupMonitors()
-	rl.DisableCursor()
-	rl.HideCursor()
+	if windowedMode {
+		// A single rectangle covering the whole window; grUpdateDisplay
+		// letterboxes the scene into it. Recomputed each frame so live window
+		// resizing keeps the scene fitted (see refreshWindowedRect).
+		refreshWindowedRect()
+	} else {
+		// r.c. - spans the window across every connected monitor (not just the
+		// current one) and records each monitor's own rectangle for the
+		// renderer to draw a separate copy of the scene into. On a
+		// single-monitor system this behaves exactly like the previous code.
+		setupMonitors()
+	}
+	if !windowedMode {
+		// Screensaver window: capture and hide the cursor. In windowed mode
+		// keep the normal cursor so the window stays usable.
+		rl.DisableCursor()
+		rl.HideCursor()
+	}
 
 	rl.InitAudioDevice()
 	rl.SetMasterVolume(1.0)
