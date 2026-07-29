@@ -70,6 +70,7 @@ func adjustStartTime(val int, up bool) int {
 }
 
 func runOptionsWindow() {
+	preferX11Backend()
 	rl.SetConfigFlags(rl.FlagWindowHighdpi)
 	rl.InitWindow(600, 500, "ScreenAntics - Setup")
 	defer rl.CloseWindow()
@@ -479,6 +480,8 @@ func main() {
 
 func setupApp() {
 	cfgFileRead(&activeConfig)
+
+	preferX11Backend()
 
 	// Enable 4x MSAA, undecorated, and resizable window flags before initialization to ensure window focus
 	rl.SetConfigFlags(rl.FlagMsaa4xHint | rl.FlagWindowUndecorated | rl.FlagWindowResizable)

@@ -91,6 +91,23 @@ func setupMonitors() {
 	rl.SetWindowSize(int(totalW), int(totalH))
 	rl.SetWindowPosition(int(minX), int(minY))
 
+	// Some platforms (notably Wayland) refuse programmatic window resizing and
+	// positioning, so the framebuffer stays at its initial size even though the
+	// monitors report a larger virtual desktop. If the actual render surface
+	// does not match the requested span, the per-monitor spanning layout would
+	// place the scene off-screen; fall back to a single rectangle covering the
+	// real window so the scene is drawn where it is actually visible.
+	realW := float32(rl.GetRenderWidth())
+	realH := float32(rl.GetRenderHeight())
+	if realW <= 0 || realH <= 0 {
+		realW, realH = float32(rl.GetScreenWidth()), float32(rl.GetScreenHeight())
+	}
+	const sizeTolerance = 4
+	if absf(realW-totalW) > sizeTolerance || absf(realH-totalH) > sizeTolerance {
+		monitorRects = []TMonitorRect{{X: 0, Y: 0, W: realW, H: realH}}
+		return
+	}
+
 	monitorRects = monitorRects[:0]
 	for _, m := range raw {
 		monitorRects = append(monitorRects, TMonitorRect{
@@ -100,4 +117,11 @@ func setupMonitors() {
 			H: m.h,
 		})
 	}
+}
+
+func absf(v float32) float32 {
+	if v < 0 {
+		return -v
+	}
+	return v
 }
