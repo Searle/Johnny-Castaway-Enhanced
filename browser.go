@@ -154,7 +154,7 @@ func loadBitmapImg(idx int) []*rl.Texture2D {
 			}
 		}
 		data = data[dataOffset+1:]
-		spriteImg := rl.NewImage(pixelData, int32(width), int32(height), 1, rl.UncompressedR8g8b8a8)
+		spriteImg := newRGBAImage(pixelData, width, height)
 		spriteTexture := rl.LoadTextureFromImage(spriteImg)
 		tmpSprites = append(tmpSprites, &spriteTexture)
 
@@ -210,7 +210,7 @@ func loadScrImg(screenName string) *rl.Texture2D {
 		}
 	}
 
-	spriteImg := rl.NewImage(pixelData, int32(width), int32(height), 1, rl.UncompressedR8g8b8a8)
+	spriteImg := newRGBAImage(pixelData, width, height)
 	spriteTexture := rl.LoadTextureFromImage(spriteImg)
 	return &spriteTexture
 }

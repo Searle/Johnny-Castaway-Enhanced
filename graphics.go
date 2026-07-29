@@ -1,6 +1,5 @@
 package main
 
-import "C"
 import (
 	"encoding/json"
 	"fmt"
@@ -2268,7 +2267,7 @@ func grLoadScreen(screenName string) {
 		}
 	}
 
-	spriteImg := rl.NewImage(pixelData, int32(width), int32(height), 1, rl.UncompressedR8g8b8a8)
+	spriteImg := newRGBAImage(pixelData, width, height)
 	spriteTexture := rl.LoadTextureFromImage(spriteImg)
 	defer rl.UnloadTexture(spriteTexture)
 
@@ -2403,7 +2402,7 @@ func grLoadBmp(ttmSlot *TTtmSlot, slotNo uint16, name string) {
 		}
 		// segments the data to be the next cel of the sprite.
 		data = data[dataOffset+1:]
-		spriteImg := rl.NewImage(pixelData, int32(width), int32(height), 1, rl.UncompressedR8g8b8a8)
+		spriteImg := newRGBAImage(pixelData, width, height)
 		spriteTexture := rl.LoadTextureFromImage(spriteImg)
 		ttmSlot.sprites[slotNo][img] = &spriteTexture
 	}

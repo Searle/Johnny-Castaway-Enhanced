@@ -50,7 +50,10 @@ const (
 func cfgFullPath() string {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
-		panic(fmt.Errorf("user home dir: %w", err))
+		// No home directory (e.g. the WebAssembly/browser build has no
+		// $HOME and no persistent filesystem). Return an empty path; callers
+		// treat the failed open/create as "use defaults / skip persistence".
+		return ""
 	}
 
 	fullPath := path.Join(homeDir, CfgFileName)
