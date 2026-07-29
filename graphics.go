@@ -8,7 +8,6 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"syscall"
 	"time"
 
 	"strings"
@@ -52,9 +51,6 @@ var (
 )
 
 var (
-	modUser32            = syscall.NewLazyDLL("user32.dll")
-	procGetAsyncKeyState = modUser32.NewProc("GetAsyncKeyState")
-
 	prevSpaceDown  = false
 	prevMDown      = false
 	prevEnterDown  = false
@@ -62,19 +58,10 @@ var (
 	prevShiftDown  = false
 )
 
-func isKeyDownGlobally(vk int) bool {
-	r, _, _ := procGetAsyncKeyState.Call(uintptr(vk))
-	return (r & 0x8000) != 0
-}
-
-func isAnyKeyPressedGlobally() bool {
-	for vk := 8; vk <= 255; vk++ {
-		if isKeyDownGlobally(vk) {
-			return true
-		}
-	}
-	return false
-}
+// isKeyDownGlobally / isAnyKeyPressedGlobally are implemented per-platform:
+// on Windows they poll the OS via GetAsyncKeyState (so hotkeys work even when
+// the screensaver window is not focused); elsewhere they fall back to raylib's
+// in-window key state. See graphics_windows.go and graphics_other.go.
 
 type TSharedState struct {
 	Paused         bool `json:"p"`

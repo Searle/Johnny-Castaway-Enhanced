@@ -1,10 +1,10 @@
 .PHONY: run browser
 
 run:
-	go run *.go
+	go run .
 
 ttm:
-	go run *.go "ttm"
+	go run . "ttm"
 
 build-nocache:
 	go build -a
