@@ -24,6 +24,13 @@ directives — so no source `import` paths or the desktop `go.mod` change.
    cp "$(go env GOROOT)/lib/wasm/wasm_exec.js" Raylib-Go-Wasm/index/wasm_exec.js
    ```
 
+3. Copy this repo's page shell over the fork's defaults (adds viewport-fit
+   scaling of the canvas — see `web/`):
+
+   ```sh
+   cp web/index.html web/index.js Raylib-Go-Wasm/index/
+   ```
+
 ## Build
 
 ```sh
@@ -43,8 +50,16 @@ python3 -m http.server 8080 -d Raylib-Go-Wasm/index
 
 ## Status
 
-Work in progress. The package compiles and starts under `GOOS=js`, but the
-blocking story/animation loop still needs to be inverted to the browser's
-`requestAnimationFrame` model (raylib's `WindowShouldClose` is unsupported on
-web; use `SetMainLoop`). Sound loading, which extracts WAVs to a temp
-directory, also needs a browser-friendly path.
+The animated screensaver runs in the browser: the full story/animation engine
+is driven frame-by-frame via `requestAnimationFrame` (the blocking desktop loop
+is inverted with a goroutine + frame-sync channel; see `frameloop_js.go`). The
+canvas scales to fill the viewport, preserving aspect ratio (`web/`).
+
+Remaining polish, none blocking:
+
+- **Sound** — `loadSfx()` extracts WAVs to a temp directory then loads them by
+  path; the browser has no writable temp filesystem, so sound is currently
+  silent. A browser path would load from the embedded FS instead.
+- **Filter shaders** — the CRT/dither/scanline fragment shaders are desktop
+  GLSL and fail to compile as WebGL (GLSL ES 3.00). The default no-shader path
+  renders fine; only the optional filters are affected.

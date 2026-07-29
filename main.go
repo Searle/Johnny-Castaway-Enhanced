@@ -493,7 +493,7 @@ func main() {
 	if isRun || (!isSettings && !isPreview && !isBench && !isTest) {
 		isScreensaverMode = true
 	}
-	runStory()
+	runApp()
 }
 
 func setupApp() {
@@ -501,7 +501,14 @@ func setupApp() {
 
 	preferX11Backend()
 
-	if windowedMode {
+	if isWeb {
+		// The browser owns the canvas: no MSAA (requesting an antialiased WebGL
+		// context fails to initialize on some GPUs/drivers, which crashes at the
+		// first GL call), and undecorated/resizable window flags are meaningless
+		// on a <canvas>. Use the plain 640x480 backing size.
+		isScreensaverMode = false
+		rl.InitWindow(screenWidth, screenHeight, "Johnny Castaway")
+	} else if windowedMode {
 		// Normal decorated, resizable window. The scene is letterboxed to fit,
 		// and the window is not treated as a screensaver (no exit-on-input).
 		isScreensaverMode = false
@@ -517,8 +524,8 @@ func setupApp() {
 		panic("Fatal: Failed to initialize window. Please check your OpenGL/graphics drivers.")
 	}
 
-	if windowedMode {
-		// A single rectangle covering the whole window; grUpdateDisplay
+	if windowedMode || isWeb {
+		// A single rectangle covering the whole window/canvas; grUpdateDisplay
 		// letterboxes the scene into it. Recomputed each frame so live window
 		// resizing keeps the scene fitted (see refreshWindowedRect).
 		refreshWindowedRect()
@@ -529,9 +536,10 @@ func setupApp() {
 		// single-monitor system this behaves exactly like the previous code.
 		setupMonitors()
 	}
-	if !windowedMode {
-		// Screensaver window: capture and hide the cursor. In windowed mode
-		// keep the normal cursor so the window stays usable.
+	if !windowedMode && !isWeb {
+		// Screensaver window: capture and hide the cursor. In windowed mode keep
+		// the normal cursor so the window stays usable; likewise on the web,
+		// where hiding/locking the pointer in a browser tab is undesirable.
 		rl.DisableCursor()
 		rl.HideCursor()
 	}
@@ -549,6 +557,13 @@ func setupApp() {
 }
 
 func doFadeIn() {
+	// The web build cannot run this blocking fade loop (rl.WindowShouldClose
+	// panics on web, and the browser owns the frame loop). Skip it; the scene
+	// simply appears without the initial fade-in.
+	if isWeb {
+		return
+	}
+
 	fadeInVal = 255.0
 
 	for !rl.WindowShouldClose() && !shouldExitApp {

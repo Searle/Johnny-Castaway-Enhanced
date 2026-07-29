@@ -362,7 +362,7 @@ func grLoadPalette(palResource *TPALResource) {
 	}
 }
 
-const sharpBilinearFs = `#version 330
+const sharpBilinearFs = `
 in vec2 fragTexCoord;
 in vec4 fragColor;
 uniform sampler2D texture0;
@@ -384,7 +384,7 @@ void main() {
     finalColor = col * fragColor;
 }`
 
-const ditherBlendFs = `#version 330
+const ditherBlendFs = `
 in vec2 fragTexCoord;
 in vec4 fragColor;
 uniform sampler2D texture0;
@@ -411,7 +411,7 @@ void main() {
     finalColor = col * fragColor;
 }`
 
-const smartDitherFs = `#version 330
+const smartDitherFs = `
 in vec2 fragTexCoord;
 in vec4 fragColor;
 uniform sampler2D texture0;
@@ -456,7 +456,7 @@ void main() {
     finalColor = col * fragColor;
 }`
 
-const scanlineFs = `#version 330
+const scanlineFs = `
 in vec2 fragTexCoord;
 in vec4 fragColor;
 uniform sampler2D texture0;
@@ -472,7 +472,7 @@ void main() {
     finalColor = col * fragColor;
 }`
 
-const crtSimulatorFs = `#version 330
+const crtSimulatorFs = `
 in vec2 fragTexCoord;
 in vec4 fragColor;
 uniform sampler2D texture0;
@@ -552,6 +552,15 @@ var (
 )
 
 func graphicsInit() {
+	// The WebAssembly build cannot render the post-processing filter shaders:
+	// BrownNPC/Raylib-Go-Wasm's WebGL raylib does not draw through a custom
+	// shader via DrawTexturePro (verified with a minimal repro), so any filter
+	// mode produces a black screen. Force the plain no-shader path on web.
+	if isWeb {
+		activeConfig.FilterMode = 0
+		activeConfig.Scanlines = false
+	}
+
 	// todo more stuff
 	grLoadPalette(&palResources[0])
 
@@ -602,26 +611,26 @@ func graphicsInit() {
 	grFinalRenderSur = &rt
 
 	// Load shaders from memory
-	sharpBilinearShader = rl.LoadShaderFromMemory("", sharpBilinearFs)
+	sharpBilinearShader = loadFsShader(sharpBilinearFs)
 	sharpBilinearTexSizeLoc = rl.GetShaderLocation(sharpBilinearShader, "textureSize")
 	sharpBilinearRenSizeLoc = rl.GetShaderLocation(sharpBilinearShader, "renderSize")
 	sharpBilinearScanLoc = rl.GetShaderLocation(sharpBilinearShader, "scanlineWeight")
 
-	ditherBlendShader = rl.LoadShaderFromMemory("", ditherBlendFs)
+	ditherBlendShader = loadFsShader(ditherBlendFs)
 	ditherBlendTexSizeLoc = rl.GetShaderLocation(ditherBlendShader, "textureSize")
 	ditherBlendRenSizeLoc = rl.GetShaderLocation(ditherBlendShader, "renderSize")
 	ditherBlendScanLoc = rl.GetShaderLocation(ditherBlendShader, "scanlineWeight")
 
-	smartDitherShader = rl.LoadShaderFromMemory("", smartDitherFs)
+	smartDitherShader = loadFsShader(smartDitherFs)
 	smartDitherTexSizeLoc = rl.GetShaderLocation(smartDitherShader, "textureSize")
 	smartDitherRenSizeLoc = rl.GetShaderLocation(smartDitherShader, "renderSize")
 	smartDitherScanLoc = rl.GetShaderLocation(smartDitherShader, "scanlineWeight")
 
-	scanlineShader = rl.LoadShaderFromMemory("", scanlineFs)
+	scanlineShader = loadFsShader(scanlineFs)
 	scanlineTexSizeLoc = rl.GetShaderLocation(scanlineShader, "textureSize")
 	scanlineScanLoc = rl.GetShaderLocation(scanlineShader, "scanlineWeight")
 
-	crtSimulatorShader = rl.LoadShaderFromMemory("", crtSimulatorFs)
+	crtSimulatorShader = loadFsShader(crtSimulatorFs)
 	crtSimulatorTexSizeLoc = rl.GetShaderLocation(crtSimulatorShader, "textureSize")
 	crtSimulatorRenSizeLoc = rl.GetShaderLocation(crtSimulatorShader, "renderSize")
 	crtSimulatorScanLoc = rl.GetShaderLocation(crtSimulatorShader, "scanlineWeight")
@@ -666,9 +675,10 @@ func grUpdateDisplay(
 	ttmHolidayThread *TTtmThread,
 	ttmCloudsThread *TTtmThread,
 ) {
-	// In windowed mode, refresh the single full-window rect each frame so the
-	// letterboxed scene keeps fitting while the user resizes the window.
-	if windowedMode {
+	// In windowed mode and on the web, refresh the single full-window rect each
+	// frame so the letterboxed scene keeps fitting when the window/canvas
+	// resizes.
+	if windowedMode || isWeb {
 		refreshWindowedRect()
 	}
 
@@ -768,7 +778,9 @@ func grUpdateDisplay(
 			prevEscapeDown = escapeDown
 		}
 
-		if rl.WindowShouldClose() || shouldExitApp {
+		// rl.WindowShouldClose() panics on the web (no window to close there);
+		// the browser tab lifecycle handles teardown instead.
+		if (!isWeb && rl.WindowShouldClose()) || shouldExitApp {
 			shouldExitApp = true
 			fmt.Println("exiting...")
 			return
@@ -1131,7 +1143,14 @@ func grUpdateDisplay(
 		}
 		const fps = 30
 		const frameDelayMS = 1000 / fps
-		time.Sleep(time.Millisecond * time.Duration(frameDelayMS))
+		if isWeb {
+			// The browser owns frame pacing via requestAnimationFrame; hand the
+			// composed frame to the rAF loop and wait for the next tick instead
+			// of sleeping (the engine runs in a goroutine, see frameloop_js.go).
+			webYieldFrame()
+		} else {
+			time.Sleep(time.Millisecond * time.Duration(frameDelayMS))
+		}
 
 		if isFadingIn {
 			fadeInRadius += 25
@@ -2431,7 +2450,11 @@ func grFadeOut() {
 			isFadingOut = false
 		}
 
-		time.Sleep(time.Millisecond * 33)
+		if isWeb {
+			webYieldFrame()
+		} else {
+			time.Sleep(time.Millisecond * 33)
+		}
 	}
 }
 

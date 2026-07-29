@@ -2,8 +2,6 @@ package main
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 
 	rl "github.com/gen2brain/raylib-go/raylib"
 )
@@ -38,28 +36,19 @@ var (
 		"sound23.wav",
 		"sound24.wav",
 	}
-	soundSfx    = make([]rl.Sound, len(sfx))
-	soundTmpDir string
+	soundSfx = make([]rl.Sound, len(sfx))
 )
 
 func loadSfx() {
-	// Extract embedded sounds to a process-specific temp directory to avoid conflicts
-	soundTmpDir = filepath.Join(os.TempDir(), fmt.Sprintf("johnny_castaway_sounds_%d", os.Getpid()))
-	_ = os.MkdirAll(soundTmpDir, 0755)
+	// registerSoundFS is a no-op on desktop; on the web it hands the embedded
+	// resources to raylib's virtual filesystem so LoadSound(path) can find them.
+	registerSoundFS()
 
 	for i, filename := range sfx {
 		if filename == "missing" {
 			continue
 		}
-		data, err := embeddedSounds.ReadFile("resources/" + filename)
-		if err != nil {
-			fmt.Printf("Warning: embedded sound %s not found\n", filename)
-			continue
-		}
-		tmpPath := filepath.Join(soundTmpDir, filename)
-		_ = os.WriteFile(tmpPath, data, 0644)
-		snd := rl.LoadSound(tmpPath)
-		soundSfx[i] = snd
+		soundSfx[i] = loadOneSound(filename)
 	}
 }
 
@@ -69,10 +58,6 @@ func unloadSfx() {
 			continue
 		}
 		rl.UnloadSound(snd)
-	}
-	// Clean up temp files
-	if soundTmpDir != "" {
-		os.RemoveAll(soundTmpDir)
 	}
 }
 
