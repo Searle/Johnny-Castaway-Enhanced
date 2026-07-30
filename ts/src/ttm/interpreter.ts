@@ -1,6 +1,6 @@
 import { Op } from "./opcodes";
 import type { Manifest, Op as RawOp, LoadedSheet } from "../manifest";
-import type { Renderer } from "../render/renderer";
+import type { Layer, Renderer } from "../render/renderer";
 
 // A parsed tag: a jump target the GOTO_TAG / PURGE opcodes reference.
 interface Tag {
@@ -22,11 +22,15 @@ export class TtmThread {
   private readonly ops: RawOp[];
   private readonly tags: Tag[] = [];
   private readonly sheets: Map<string, LoadedSheet>;
-  private readonly renderer: Renderer;
+  private readonly renderer: Renderer; // shared, for LOAD_SCREEN background
+  private layer: Layer; // this thread's own draw surface
+  private originDx = 0;
+  private originDy = 0;
+  private startTagId?: number;
 
   private ip = 0; // index into ops
-  private delay = 6; // ticks to wait after the current frame
-  private timer = 0; // ticks remaining before the next frame runs
+  private delayVal = 6; // ticks to wait after the current frame
+  private timerVal = 0; // ticks remaining before the next frame runs
   private nextGoto = -1; // pending jump target (op index), or -1
   private done = false;
 
@@ -46,12 +50,15 @@ export class TtmThread {
     manifest: Manifest,
     sheets: Map<string, LoadedSheet>,
     renderer: Renderer,
+    layer: Layer,
     startTag?: number,
   ) {
     this.ops = manifest.ops;
     this.sheets = sheets;
     this.renderer = renderer;
+    this.layer = layer;
     this.palette = manifest.palette ?? [];
+    this.startTagId = startTag;
     this.buildTags();
 
     // Fast-forward from the file start to the chosen scene tag, executing the
@@ -68,7 +75,7 @@ export class TtmThread {
     if (target >= 0) this.fastForwardTo(target);
 
     // Enter the scene fresh: run its first frame on the very next tick.
-    this.timer = 0;
+    this.timerVal = 0;
     this.nextGoto = -1;
   }
 
@@ -78,6 +85,65 @@ export class TtmThread {
 
   get tagIds(): number[] {
     return this.tags.map((t) => t.id);
+  }
+
+  // --- ADS scheduler interface (ads.go main-loop timing) ---
+  // The multi-thread ADS loop drives frames itself: it runs a frame when a
+  // thread's `timer` hits 0, then advances all threads' timers by the smallest
+  // one. These accessors let AdsScheduler own that timing instead of tick().
+
+  get timer(): number {
+    return this.timerVal;
+  }
+  set timer(v: number) {
+    this.timerVal = v;
+  }
+  get delay(): number {
+    return this.delayVal;
+  }
+
+  // sceneTag/sceneRootTag identify which ADS scene this thread is playing, for
+  // STOP_SCENE / IF_IS_RUNNING checks.
+  sceneRootTag = 0;
+
+  // setOrigin sets this thread's grDx/grDy (story positioning).
+  setOrigin(dx: number, dy: number): void {
+    this.originDx = dx;
+    this.originDy = dy;
+    this.layer.setOrigin(dx, dy);
+  }
+
+  // rebindLayer moves this thread's drawing to a new layer (used when the ADS
+  // scheduler rebuilds the layer stack after a scene stops). Reapplies origin;
+  // the next frame redraws content (TTM frames are self-contained via CLEAR).
+  rebindLayer(layer: Layer): void {
+    this.layer = layer;
+    this.layer.setOrigin(this.originDx, this.originDy);
+  }
+
+  // restart re-enters the scene at its start tag for an iteration replay
+  // (ADD_SCENE arg3 > 0). Slot-0 scenes re-enter at ip 0.
+  restart(): void {
+    this.done = false;
+    this.timerVal = 0;
+    this.nextGoto = -1;
+    if (this.startTagId != null) {
+      const t = this.findTag(this.startTagId);
+      this.ip = t >= 0 ? t : 0;
+    } else {
+      this.ip = 0;
+    }
+  }
+
+  // runOneFrame executes opcodes up to the next UPDATE (one displayed frame),
+  // applying any pending jump first — the body of the ADS main loop.
+  runOneFrame(): void {
+    if (this.done) return;
+    if (this.nextGoto >= 0) {
+      this.ip = this.nextGoto;
+      this.nextGoto = -1;
+    }
+    this.runFrame();
   }
 
   // When true, execOne runs state-changing opcodes (loads, slot/color/clip
@@ -135,9 +201,9 @@ export class TtmThread {
   // changed (so the caller can present()).
   tick(): boolean {
     if (this.done) return false;
-    if (this.timer > 0) {
-      this.timer--;
-      if (this.timer > 0) return false;
+    if (this.timerVal > 0) {
+      this.timerVal--;
+      if (this.timerVal > 0) return false;
     }
     // timer reached 0: apply pending jump (ads.go main-loop jump processing).
     if (this.nextGoto >= 0) {
@@ -145,7 +211,7 @@ export class TtmThread {
       this.nextGoto = -1;
     }
     this.runFrame();
-    this.timer = this.delay;
+    this.timerVal = this.delayVal;
     return true;
   }
 
@@ -176,16 +242,16 @@ export class TtmThread {
 
         case Op.SET_DELAY: {
           const v = a[0] > 4 ? a[0] : 4;
-          this.delay = v;
-          this.timer = v;
+          this.delayVal = v;
+          this.timerVal = v;
           break;
         }
         case Op.TIMER: {
           // (min,max) range → uniform random delay, matching the Go 0x2022.
           const lo = a[0],
             hi = a[1];
-          this.delay = hi > lo ? lo + Math.floor(Math.random() * (hi - lo + 1)) : lo;
-          this.timer = this.delay;
+          this.delayVal = hi > lo ? lo + Math.floor(Math.random() * (hi - lo + 1)) : lo;
+          this.timerVal = this.delayVal;
           break;
         }
 
@@ -205,7 +271,7 @@ export class TtmThread {
         }
 
         case Op.CLEAR_SCREEN:
-          if (!this.suppressDraw) this.renderer.clearScreen();
+          if (!this.suppressDraw) this.layer.clear();
           break;
 
         case Op.DRAW_SPRITE:
@@ -216,7 +282,7 @@ export class TtmThread {
           const sheet = this.bmpSlots[imageNo];
           const frame = sheet?.frames[spriteNo];
           if (frame) {
-            this.renderer.drawSprite(frame, s16(x), s16(y), raw.op === Op.DRAW_SPRITE_FLIP);
+            this.layer.drawSprite(frame, s16(x), s16(y), raw.op === Op.DRAW_SPRITE_FLIP);
           }
           break;
         }
@@ -228,23 +294,23 @@ export class TtmThread {
 
         case Op.DRAW_LINE:
           if (!this.suppressDraw)
-            this.renderer.drawLine(s16(a[0]), s16(a[1]), s16(a[2]), s16(a[3]), this.color(this.fgColor));
+            this.layer.drawLine(s16(a[0]), s16(a[1]), s16(a[2]), s16(a[3]), this.color(this.fgColor));
           break;
         case Op.DRAW_RECT:
           // args: x, y, w, h (w/h are unsigned sizes)
           if (!this.suppressDraw)
-            this.renderer.drawRect(s16(a[0]), s16(a[1]), a[2], a[3], this.color(this.fgColor));
+            this.layer.drawRect(s16(a[0]), s16(a[1]), a[2], a[3], this.color(this.fgColor));
           break;
         case Op.DRAW_CIRCLE: {
           if (this.suppressDraw) break;
           // args: x, y, w, h — filled with bgColor, outlined with fgColor.
           const fg = this.color(this.fgColor);
           const bg = this.color(this.bgColor);
-          this.renderer.drawCircle(s16(a[0]), s16(a[1]), a[2], a[3], bg, fg === bg ? null : fg);
+          this.layer.drawCircle(s16(a[0]), s16(a[1]), a[2], a[3], bg, fg === bg ? null : fg);
           break;
         }
         case Op.DRAW_PIXEL:
-          if (!this.suppressDraw) this.renderer.drawPixel(s16(a[0]), s16(a[1]), this.color(this.fgColor));
+          if (!this.suppressDraw) this.layer.drawPixel(s16(a[0]), s16(a[1]), this.color(this.fgColor));
           break;
 
         case Op.SET_CLIP_ZONE: {
@@ -256,9 +322,9 @@ export class TtmThread {
             x2 = s16(a[2]),
             y2 = s16(a[3]);
           if (x1 <= 0 && y1 <= 0 && x2 >= 639 && y2 >= 479) {
-            this.renderer.clearClip();
+            this.layer.clearClip();
           } else {
-            this.renderer.setClip(x1, y1, x2 - x1 + 1, y2 - y1 + 1);
+            this.layer.setClip(x1, y1, x2 - x1 + 1, y2 - y1 + 1);
           }
           break;
         }

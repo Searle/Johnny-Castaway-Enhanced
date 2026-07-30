@@ -6,8 +6,15 @@ extractor, and its build — lives under this `ts/` directory. The only thing it
 reaches outside for is the (git-ignored, copyright) game data in the repo-root
 `assets/`, shared with the Go build.
 
-**Experimental** — plays a single TTM script entered at one scene tag, with a
-scene browser to pick any animation + tag. Not the full ADS scene scheduler.
+**Experimental.** Two modes (toggle in the UI):
+- **TTM scene** — play a single animation script at a chosen scene tag.
+- **ADS script** — run a whole scene-director script (MARY, FISHING, WALKSTUF…):
+  it auto-sequences scenes, runs concurrent threads (boat + Johnny), and picks
+  scenes via the ADS random/conditional logic.
+
+Not yet ported: JOHNNY.ADS's top-level idle loop, and the full story calendar
+that supplies exact island positions (so a few positioned "story" scenes — e.g.
+SMDATE via MARY.ADS — are offset but not pixel-perfectly placed).
 
 ## Layout
 
@@ -15,14 +22,20 @@ scene browser to pick any animation + tag. Not the full ADS scene scheduler.
 ts/
   src/
     ttm/opcodes.ts      TTM opcode constants (from ttm.go)
-    ttm/interpreter.ts  single-thread TTM interpreter (port of ttmPlay + the
-                        ADS main-loop timing model, ttm.go / ads.go)
-    render/renderer.ts  backend-agnostic Renderer interface (the Pixi-swap seam)
-    render/canvas2d.ts  Canvas2D implementation (background + sprite layer)
-    manifest.ts         loads manifest.json + sprite PNGs as ImageBitmaps
-    main.ts             rAF loop driving the interpreter at ~30 ticks/sec
+    ttm/interpreter.ts  TTM interpreter / one scene thread (port of ttmPlay)
+    ads/opcodes.ts      ADS opcode constants (from ads.go)
+    ads/scheduler.ts    ADS scene-director: ADD/STOP/RANDOM/conditionals, the
+                        multi-thread main loop, triggered chunks (port of ads.go)
+    ads/positioning.ts  per-scene grDx/grDy island offset (story layer)
+    render/renderer.ts  Renderer + Layer interfaces (the Pixi-swap seam)
+    render/canvas2d.ts  Canvas2D compositor: background + one layer per thread
+    manifest.ts         loads manifest.json / ads.json + PNGs as ImageBitmaps
+    main.ts             mode toggle + dropdowns + the ~30 ticks/sec render loop
   tools/tsextract/      Go asset extractor (its own module; see below)
   public/anim/          extracted assets (git-ignored, regenerated)
+    <TTM>/              per-TTM sprites + manifest.json
+    ads/<ADS>/ads.json  per-ADS slot map + decoded bytecode
+    index.json          catalog of TTMs and ADS scripts
 ```
 
 The interpreter works in the original 640×480 virtual space; the renderer maps
@@ -65,5 +78,5 @@ npm run dev               # http://localhost:5173
 npm run build             # tsc typecheck + vite production build → dist/
 ```
 
-Use the on-page dropdowns to pick an animation and scene tag, or deep-link with
-`?anim=MJJOG.TTM&tag=1`.
+Use the mode toggle + dropdowns to pick a TTM scene or an ADS script. Deep-link
+with `?anim=MJJOG.TTM&tag=1` (TTM) or `?ads=FISHING.ADS&tag=1` (ADS).

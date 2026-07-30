@@ -54,13 +54,29 @@
   <body>
     <div id="stage">
       <div id="controls">
-        <label>animation
-          <select id="ttm"></select>
+        <label>mode
+          <select id="mode">
+            <option value="ttm">TTM scene</option>
+            <option value="ads">ADS script</option>
+          </select>
         </label>
-        <label>tag
-          <select id="tag"></select>
-        </label>
-        <button id="restart" title="Replay from the current scene tag">↻ restart</button>
+        <span id="ttmControls">
+          <label>animation
+            <select id="ttm"></select>
+          </label>
+          <label>tag
+            <select id="tag"></select>
+          </label>
+        </span>
+        <span id="adsControls" hidden>
+          <label>script
+            <select id="ads"></select>
+          </label>
+          <label>entry
+            <select id="adsTag"></select>
+          </label>
+        </span>
+        <button id="restart" title="Replay from the start">↻ restart</button>
       </div>
       <canvas id="screen" width="640" height="480"></canvas>
       <div id="hud">loading…</div>

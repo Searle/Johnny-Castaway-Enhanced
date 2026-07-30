@@ -40,9 +40,34 @@ export interface IndexEntry {
   defaultTag: number; // first tag that draws (skips bootstrap tags)
   sheets: number;
 }
+export interface AdsIndexEntry {
+  name: string; // "MARY.ADS"
+  dir: string;
+  tags: number[]; // ADS entry tags (scene sequences)
+}
+
 export interface AnimIndex {
   ttms: IndexEntry[];
+  ads: AdsIndexEntry[];
   skipped?: string[];
+}
+
+// ads/<NAME>/ads.json: the slot→TTM map and decoded ADS bytecode.
+export interface AdsRes {
+  id: number; // TTM slot id
+  name: string; // TTM resource name
+}
+export interface AdsFile {
+  name: string;
+  res: AdsRes[];
+  ops: Op[];
+}
+
+export function loadAdsFile(baseUrl: string, dir: string): Promise<AdsFile> {
+  return fetch(`${baseUrl}/ads/${dir}/ads.json`).then((r) => {
+    if (!r.ok) throw new Error(`ads/${dir}/ads.json: HTTP ${r.status}`);
+    return r.json();
+  });
 }
 
 export function loadIndex(baseUrl: string): Promise<AnimIndex> {

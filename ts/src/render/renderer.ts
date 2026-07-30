@@ -1,40 +1,55 @@
-// Renderer is the seam that keeps the interpreter independent of the drawing
-// backend. Canvas2DRenderer implements it today; a PixiRenderer (WebGL, with
-// the palette-filter effects the WASM fork couldn't do) can slot in later
-// without touching the TTM interpreter.
+// The render backend is split into a compositor (Renderer) and per-thread draw
+// surfaces (Layer). This mirrors the Go engine: a persistent background plus one
+// render-texture per running TTM thread, composited in order. It keeps the TTM
+// interpreter backend-agnostic — a WebGL/Pixi implementation can replace both
+// without touching the interpreter.
 //
 // Coordinates are the original 640x480 virtual space. The interpreter never
 // scales; the backend maps virtual space onto the real canvas.
+
+// A Layer is one TTM thread's transparent drawing surface. CLEAR_SCREEN wipes
+// it; the compositor stacks layers over the background in creation order.
+export interface Layer {
+  // Wipe this layer to transparent (TTM CLEAR_SCREEN).
+  clear(): void;
+
+  // Blit a sprite at (x, y), optionally horizontally flipped
+  // (DRAW_SPRITE / DRAW_SPRITE_FLIP).
+  drawSprite(img: ImageBitmap, x: number, y: number, flip: boolean): void;
+
+  // Primitives (DRAW_LINE / DRAW_RECT / DRAW_CIRCLE / DRAW_PIXEL). Colors are
+  // CSS strings resolved from the palette by the interpreter.
+  drawLine(x1: number, y1: number, x2: number, y2: number, color: string): void;
+  drawRect(x: number, y: number, w: number, h: number, color: string): void;
+  // Filled circle with `fill`, optional 1px `stroke` outline. Box is (x,y,w,h),
+  // shape centered in it (grDrawCircle).
+  drawCircle(x: number, y: number, w: number, h: number, fill: string, stroke: string | null): void;
+  drawPixel(x: number, y: number, color: string): void;
+
+  // Restrict subsequent drawing to a rectangle (SET_CLIP_ZONE); null clears it.
+  setClip(x: number, y: number, w: number, h: number): void;
+  clearClip(): void;
+
+  // grDx/grDy: a per-thread translation applied to every draw on this layer.
+  // The ADS/story layer sets it to position a scene on the island (the offset
+  // SMDATE and other positioned scenes need); 0 for plain scenes.
+  setOrigin(dx: number, dy: number): void;
+}
 
 export interface Renderer {
   readonly width: number;
   readonly height: number;
 
-  // Replace the background (the LOAD_SCREEN backdrop). Passing null clears it
-  // to black. The background persists across CLEAR_SCREEN.
+  // Replace the background (LOAD_SCREEN backdrop); null clears to black. The
+  // background persists across CLEAR_SCREEN and layer changes.
   setBackground(img: ImageBitmap | null): void;
 
-  // Wipe the sprite layer back to the background (TTM CLEAR_SCREEN).
-  clearScreen(): void;
+  // Create a fresh transparent layer stacked above all existing layers.
+  newLayer(): Layer;
 
-  // Blit a sprite at (x, y) in virtual space, optionally horizontally flipped
-  // (DRAW_SPRITE / DRAW_SPRITE_FLIP).
-  drawSprite(img: ImageBitmap, x: number, y: number, flip: boolean): void;
+  // Remove every layer (e.g. when switching scenes/scripts).
+  resetLayers(): void;
 
-  // Primitive shapes (DRAW_LINE / DRAW_RECT / DRAW_CIRCLE / DRAW_PIXEL). Colors
-  // are CSS strings resolved from the palette by the interpreter.
-  drawLine(x1: number, y1: number, x2: number, y2: number, color: string): void;
-  drawRect(x: number, y: number, w: number, h: number, color: string): void;
-  // Filled ellipse with `fill`, optional 1px `stroke` outline (grDrawCircle).
-  // The TTM box is (x, y, w, h); the shape is centered in it.
-  drawCircle(x: number, y: number, w: number, h: number, fill: string, stroke: string | null): void;
-  drawPixel(x: number, y: number, color: string): void;
-
-  // Restrict subsequent sprite-layer drawing to a rectangle (SET_CLIP_ZONE).
-  // Passing null clears the clip (full-screen reset).
-  setClip(x: number, y: number, w: number, h: number): void;
-  clearClip(): void;
-
-  // Composite background + sprite layer onto the visible canvas.
+  // Composite background + all layers (in creation order) onto the canvas.
   present(): void;
 }

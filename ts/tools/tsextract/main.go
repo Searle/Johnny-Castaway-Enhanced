@@ -129,15 +129,88 @@ func extractAll(res *resources, ttmPalette [16][3]uint8, out string) {
 		index = append(index, indexEntry{Name: n, Dir: n, Tags: tags, DefaultTag: defaultTag, Sheets: len(m.Sheets)})
 	}
 
+	// Extract the ADS scene-director scripts (they reference the TTMs above,
+	// already written to <out>/<TTM>/).
+	adsIndex, adsSkipped := extractAllAds(res, out)
+	skipped = append(skipped, adsSkipped...)
+
 	ij, err := json.MarshalIndent(struct {
-		TTMs    []indexEntry `json:"ttms"`
-		Skipped []string     `json:"skipped,omitempty"`
-	}{index, skipped}, "", "  ")
+		TTMs    []indexEntry    `json:"ttms"`
+		ADS     []adsIndexEntry `json:"ads"`
+		Skipped []string        `json:"skipped,omitempty"`
+	}{index, adsIndex, skipped}, "", "  ")
 	must(err, "marshal index")
 	must(os.WriteFile(filepath.Join(out, "index.json"), ij, 0o644), "write index.json")
 
-	fmt.Printf("extracted %d/%d TTMs (%d skipped) → %s/index.json\n",
-		len(index), len(names), len(skipped), out)
+	fmt.Printf("extracted %d/%d TTMs and %d ADS scripts (%d skipped) → %s/index.json\n",
+		len(index), len(names), len(adsIndex), len(skipped), out)
+}
+
+// adsIndexEntry catalogs one extracted ADS script for the browser.
+type adsIndexEntry struct {
+	Name string `json:"name"` // e.g. "MARY.ADS"
+	Dir  string `json:"dir"`  // subdir under <out>/ads
+	Tags []int  `json:"tags"` // ADS entry tags (scene sequences)
+}
+
+// AdsFile is the per-ADS JSON: the slot->TTM map and the decoded opcode stream.
+type AdsFile struct {
+	Name string   `json:"name"`
+	Res  []AdsRes `json:"res"` // TTM slot id -> TTM resource name
+	Ops  []Op     `json:"ops"` // decoded ADS bytecode
+}
+type AdsRes struct {
+	ID   int    `json:"id"`
+	Name string `json:"name"`
+}
+
+// extractAllAds decodes every ADS script into <out>/ads/<NAME>/ads.json and
+// returns their index entries. ADS whose referenced TTMs weren't extractable
+// are still emitted (the TTM pass records its own skips separately).
+func extractAllAds(res *resources, out string) ([]adsIndexEntry, []string) {
+	names := make([]string, 0, len(res.adss))
+	for n := range res.adss {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+
+	var index []adsIndexEntry
+	var skipped []string
+	for _, n := range names {
+		ads := res.adss[n]
+		ops := decodeADS(ads.data)
+
+		af := AdsFile{Name: n}
+		for _, r := range ads.res {
+			af.Res = append(af.Res, AdsRes{ID: int(r.id), Name: r.name})
+		}
+		af.Ops = ops
+
+		// ADS entry tags = the :TAG markers (opcodes not in adsArgCounts).
+		var tags []int
+		for _, op := range ops {
+			if _, known := adsArgCounts[op.Op]; !known {
+				tags = append(tags, int(op.Op))
+			}
+		}
+
+		dir := filepath.Join(out, "ads", n)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			skipped = append(skipped, fmt.Sprintf("%s (%v)", n, err))
+			continue
+		}
+		mf, err := json.MarshalIndent(af, "", "  ")
+		if err != nil {
+			skipped = append(skipped, fmt.Sprintf("%s (%v)", n, err))
+			continue
+		}
+		if err := os.WriteFile(filepath.Join(dir, "ads.json"), mf, 0o644); err != nil {
+			skipped = append(skipped, fmt.Sprintf("%s (%v)", n, err))
+			continue
+		}
+		index = append(index, adsIndexEntry{Name: n, Dir: n, Tags: tags})
+	}
+	return index, skipped
 }
 
 // extractOne decodes one TTM and writes its PNGs + manifest.json into outDir.
@@ -270,15 +343,33 @@ type scrResource struct {
 }
 type palResource [256][3]uint8 // R,G,B as stored (6-bit VGA)
 
+// adsResource is a parsed .ADS scene-director script: the RES table maps a TTM
+// slot id -> TTM resource name, and data is the decompressed ADS bytecode.
+type adsResource struct {
+	res  []adsRes // slot id -> TTM name
+	data []byte   // decompressed ADS opcode stream
+}
+type adsRes struct {
+	id   uint16
+	name string
+}
+
 type resources struct {
 	bmps map[string]*bmpResource
 	ttms map[string]*ttmResource
 	scrs map[string]*scrResource
 	pals map[string]palResource
+	adss map[string]*adsResource
 }
 
 func parseResources(mapData, resData []byte) *resources {
-	r := &resources{bmps: map[string]*bmpResource{}, ttms: map[string]*ttmResource{}, scrs: map[string]*scrResource{}, pals: map[string]palResource{}}
+	r := &resources{
+		bmps: map[string]*bmpResource{},
+		ttms: map[string]*ttmResource{},
+		scrs: map[string]*scrResource{},
+		pals: map[string]palResource{},
+		adss: map[string]*adsResource{},
+	}
 
 	// RESOURCE.MAP: 6 unknown + 13 filename + uint16 numEntries + (len u32, off u32)*
 	mb := bytes.NewReader(mapData)
@@ -318,6 +409,8 @@ func parseResources(mapData, resData []byte) *resources {
 			r.scrs[strings.ToUpper(name)] = parseScr(b)
 		case ".PAL":
 			r.pals[strings.ToUpper(name)] = parsePal(b)
+		case ".ADS":
+			r.adss[strings.ToUpper(name)] = parseAds(b)
 		}
 	}
 	return r
@@ -371,6 +464,52 @@ func parseScr(b *bytes.Reader) *scrResource {
 	uncompressedSize := ru32(b)
 	data := uncompress(b, method, compressedSize, uncompressedSize)
 	return &scrResource{width: width, height: height, data: data}
+}
+
+// parseAds mirrors resource.go parseAdsResource. Layout:
+//
+//	VER: <u32 size> <bytes>
+//	ADS: <4 bytes>
+//	RES: <u32 resSize> <u16 numRes> then numRes × (u16 id, null-terminated name)
+//	SCR: <u32 compressedSize> <u8 method> <u32 uncompressedSize> <stream>
+//	TAG: … (not needed; the runtime re-scans the decompressed bytecode)
+//
+// RES names are variable-length null-terminated, NOT fixed 40-byte records —
+// reading them fixed-width misaligns the stream (notably for JOHNNY.ADS).
+func parseAds(b *bytes.Reader) *adsResource {
+	readTag(b, "VER:")
+	verSize := ru32(b)
+	skip(b, int(verSize))
+
+	readTag(b, "ADS:")
+	skip(b, 4) // AdsUnknown
+
+	readTag(b, "RES:")
+	resSize := ru32(b)
+	numRes := int(ru16(b))
+	res := make([]adsRes, 0, numRes)
+	bytesRead := uint32(0)
+	for i := 0; i < numRes && bytesRead < resSize-2; i++ {
+		id := ru16(b)
+		bytesRead += 2
+		var nameBytes []byte
+		for {
+			c := ru8(b)
+			bytesRead++
+			if c == 0 {
+				break
+			}
+			nameBytes = append(nameBytes, c)
+		}
+		res = append(res, adsRes{id: id, name: strings.ToUpper(string(nameBytes))})
+	}
+
+	readTag(b, "SCR:")
+	compressedSize := ru32(b) - 5
+	method := ru8(b)
+	uncompressedSize := ru32(b)
+	data := uncompress(b, method, compressedSize, uncompressedSize)
+	return &adsResource{res: res, data: data}
 }
 
 func parsePal(b *bytes.Reader) palResource {
@@ -499,6 +638,59 @@ func decodeTTM(data []byte) []Op {
 		} else {
 			o.Args = make([]uint16, numArgs)
 			for i := uint8(0); i < numArgs; i++ {
+				o.Args[i] = peek16(data, &offset)
+			}
+		}
+		ops = append(ops, o)
+	}
+	return ops
+}
+
+// adsArgCounts is the number of uint16 args each ADS opcode consumes (from the
+// ads.go interpreter). Opcodes not listed are :TAG markers — the opcode value
+// itself is the tag id, with no args.
+var adsArgCounts = map[uint16]int{
+	0x1070: 2, // IF_LASTPLAYED_LOCAL
+	0x1330: 2, // IF_UNKNOWN_1 (ignored)
+	0x1350: 2, // IF_LASTPLAYED
+	0x1360: 2, // IF_NOT_RUNNING
+	0x1370: 2, // IF_IS_RUNNING
+	0x1420: 0, // AND
+	0x1430: 0, // OR
+	0x1510: 0, // PLAY_SCENE
+	0x1520: 5, // ADD_SCENE_LOCAL
+	0x2005: 4, // ADD_SCENE
+	0x2010: 3, // STOP_SCENE
+	0x2014: 0, // (seen in adsLoad; 0 args)
+	0x3010: 0, // RANDOM_START
+	0x3020: 1, // NOP (weight)
+	0x30ff: 0, // RANDOM_END
+	0x4000: 3, // UNKNOWN_6
+	0xf010: 0, // FADE_OUT
+	0xf200: 1, // GOSUB_TAG
+	0xffff: 0, // END
+	0xfff0: 0, // END_IF
+}
+
+// decodeADS decodes the ADS bytecode into a flat opcode list. Unlike TTM, ADS
+// opcodes have fixed per-opcode arg counts (adsArgCounts); anything else is a
+// :TAG marker whose opcode value is the tag id.
+func decodeADS(data []byte) []Op {
+	var ops []Op
+	var offset uint32
+	size := uint32(len(data))
+	for offset < size {
+		op := peek16(data, &offset)
+		n, known := adsArgCounts[op]
+		if !known {
+			// :TAG marker — record it so the runtime can find chunk offsets.
+			ops = append(ops, Op{Op: op})
+			continue
+		}
+		o := Op{Op: op}
+		if n > 0 {
+			o.Args = make([]uint16, n)
+			for i := 0; i < n; i++ {
 				o.Args[i] = peek16(data, &offset)
 			}
 		}

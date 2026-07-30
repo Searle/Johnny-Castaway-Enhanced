@@ -1,78 +1,68 @@
-import type { Renderer } from "./renderer";
+import type { Layer, Renderer } from "./renderer";
 
-// Canvas2DRenderer draws in 640x480 virtual space onto an offscreen sprite
-// layer, then composites background + sprites onto the visible canvas. This
-// mirrors the Go engine's model: a persistent background surface plus a TTM
-// layer that CLEAR_SCREEN wipes.
-export class Canvas2DRenderer implements Renderer {
-  readonly width = 640;
-  readonly height = 480;
+const W = 640;
+const H = 480;
 
-  private readonly out: CanvasRenderingContext2D;
-  // Sprite layer: transparent over the background, wiped by clearScreen().
-  private readonly layer: OffscreenCanvas;
-  private readonly layerCtx: OffscreenCanvasRenderingContext2D;
-  private background: ImageBitmap | null = null;
-
-  constructor(canvas: HTMLCanvasElement) {
-    const ctx = canvas.getContext("2d");
-    if (!ctx) throw new Error("2d context unavailable");
-    this.out = ctx;
-    this.out.imageSmoothingEnabled = false;
-
-    this.layer = new OffscreenCanvas(this.width, this.height);
-    const lctx = this.layer.getContext("2d");
-    if (!lctx) throw new Error("offscreen 2d context unavailable");
-    this.layerCtx = lctx;
-    this.layerCtx.imageSmoothingEnabled = false;
-  }
-
-  // Active clip rect in virtual space, or null for none. Reapplied around every
-  // layer draw (Canvas2D clip() is bound to the current save/restore scope, so
-  // we can't hold it open across calls the way raylib's scissor mode does).
+// Canvas2DLayer is one thread's offscreen drawing surface. All draws honor the
+// per-layer origin (grDx/grDy) and the active clip rect.
+class Canvas2DLayer implements Layer {
+  readonly canvas: OffscreenCanvas;
+  private readonly ctx: OffscreenCanvasRenderingContext2D;
   private clip: { x: number; y: number; w: number; h: number } | null = null;
+  private dx = 0;
+  private dy = 0;
 
-  setBackground(img: ImageBitmap | null): void {
-    this.background = img;
+  constructor() {
+    this.canvas = new OffscreenCanvas(W, H);
+    const ctx = this.canvas.getContext("2d");
+    if (!ctx) throw new Error("offscreen 2d context unavailable");
+    this.ctx = ctx;
+    this.ctx.imageSmoothingEnabled = false;
   }
 
-  clearScreen(): void {
-    this.layerCtx.clearRect(0, 0, this.width, this.height);
+  setOrigin(dx: number, dy: number): void {
+    this.dx = dx;
+    this.dy = dy;
+  }
+
+  clear(): void {
+    this.ctx.clearRect(0, 0, W, H);
   }
 
   setClip(x: number, y: number, w: number, h: number): void {
-    this.clip = { x, y, w, h };
+    this.clip = { x: x + this.dx, y: y + this.dy, w, h };
   }
-
   clearClip(): void {
     this.clip = null;
   }
 
-  // withClip runs a draw with the current clip rect applied (if any).
+  // withClip applies the clip rect (if any) around a draw. Canvas2D clip() is
+  // bound to the current save/restore scope, so it must be reapplied per draw
+  // rather than held open like raylib's scissor mode.
   private withClip(draw: (ctx: OffscreenCanvasRenderingContext2D) => void): void {
-    const ctx = this.layerCtx;
     if (!this.clip) {
-      draw(ctx);
+      draw(this.ctx);
       return;
     }
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(this.clip.x, this.clip.y, this.clip.w, this.clip.h);
-    ctx.clip();
-    draw(ctx);
-    ctx.restore();
+    this.ctx.save();
+    this.ctx.beginPath();
+    this.ctx.rect(this.clip.x, this.clip.y, this.clip.w, this.clip.h);
+    this.ctx.clip();
+    draw(this.ctx);
+    this.ctx.restore();
   }
 
   drawSprite(img: ImageBitmap, x: number, y: number, flip: boolean): void {
+    const px = x + this.dx;
+    const py = y + this.dy;
     this.withClip((ctx) => {
       if (!flip) {
-        ctx.drawImage(img, x, y);
+        ctx.drawImage(img, px, py);
         return;
       }
-      // Horizontal mirror about the sprite's own box, matching grDrawSpriteFlip
-      // (negative-width source rect in raylib).
+      // Horizontal mirror about the sprite's own box (grDrawSpriteFlip).
       ctx.save();
-      ctx.translate(x + img.width, y);
+      ctx.translate(px + img.width, py);
       ctx.scale(-1, 1);
       ctx.drawImage(img, 0, 0);
       ctx.restore();
@@ -85,8 +75,8 @@ export class Canvas2DRenderer implements Renderer {
       ctx.lineWidth = 1;
       ctx.beginPath();
       // +0.5 to hit pixel centers so 1px lines don't blur across two rows.
-      ctx.moveTo(x1 + 0.5, y1 + 0.5);
-      ctx.lineTo(x2 + 0.5, y2 + 0.5);
+      ctx.moveTo(x1 + this.dx + 0.5, y1 + this.dy + 0.5);
+      ctx.lineTo(x2 + this.dx + 0.5, y2 + this.dy + 0.5);
       ctx.stroke();
     });
   }
@@ -94,16 +84,15 @@ export class Canvas2DRenderer implements Renderer {
   drawRect(x: number, y: number, w: number, h: number, color: string): void {
     this.withClip((ctx) => {
       ctx.fillStyle = color;
-      ctx.fillRect(x, y, w, h);
+      ctx.fillRect(x + this.dx, y + this.dy, w, h);
     });
   }
 
   drawCircle(x: number, y: number, w: number, _h: number, fill: string, stroke: string | null): void {
-    // grDrawCircle: box (x,y,w,h) with w==h (only true circles supported, so h
-    // is ignored); center at (x+r, y+r), radius w/2.
+    // Box (x,y,w,h) with w==h (only true circles supported); center (x+r, y+r).
     const r = w / 2;
-    const cx = x + r;
-    const cy = y + r;
+    const cx = x + this.dx + r;
+    const cy = y + this.dy + r;
     this.withClip((ctx) => {
       ctx.beginPath();
       ctx.arc(cx, cy, r, 0, Math.PI * 2);
@@ -120,8 +109,40 @@ export class Canvas2DRenderer implements Renderer {
   drawPixel(x: number, y: number, color: string): void {
     this.withClip((ctx) => {
       ctx.fillStyle = color;
-      ctx.fillRect(x, y, 1, 1);
+      ctx.fillRect(x + this.dx, y + this.dy, 1, 1);
     });
+  }
+}
+
+// Canvas2DRenderer composites a persistent background plus an ordered stack of
+// layers onto the visible canvas.
+export class Canvas2DRenderer implements Renderer {
+  readonly width = W;
+  readonly height = H;
+
+  private readonly out: CanvasRenderingContext2D;
+  private background: ImageBitmap | null = null;
+  private layers: Canvas2DLayer[] = [];
+
+  constructor(canvas: HTMLCanvasElement) {
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("2d context unavailable");
+    this.out = ctx;
+    this.out.imageSmoothingEnabled = false;
+  }
+
+  setBackground(img: ImageBitmap | null): void {
+    this.background = img;
+  }
+
+  newLayer(): Layer {
+    const layer = new Canvas2DLayer();
+    this.layers.push(layer);
+    return layer;
+  }
+
+  resetLayers(): void {
+    this.layers = [];
   }
 
   present(): void {
@@ -131,6 +152,8 @@ export class Canvas2DRenderer implements Renderer {
       this.out.fillStyle = "#000";
       this.out.fillRect(0, 0, this.width, this.height);
     }
-    this.out.drawImage(this.layer, 0, 0);
+    for (const layer of this.layers) {
+      this.out.drawImage(layer.canvas, 0, 0);
+    }
   }
 }

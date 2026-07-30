@@ -1,7 +1,9 @@
 node_modules/
 dist/
 
-# Pre-extracted game assets — regenerate with:
-#   go run ./tools/tsextract -ttm MJJOG.TTM -out ts/public/anim
+# Pre-extracted game assets — regenerate with `npm run extract -- -all`.
 # (kept out of git for the same copyright reasons as assets/RESOURCE.*)
 public/anim/
+
+# compiled Go binary from `go build` / `go run` in the tool dir
+tools/tsextract/tsextract
