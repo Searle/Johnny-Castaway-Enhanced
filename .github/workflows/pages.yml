@@ -7,7 +7,7 @@ name: Build & deploy WebAssembly to GitHub Pages
 
 on:
   push:
-    branches: [main, dev]
+    branches: [linux-and-wasm]
   workflow_dispatch:
 
 # Allow the workflow to publish Pages.
