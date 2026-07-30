@@ -22,8 +22,10 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Pin the pure-Go WebGL fork so builds are reproducible.
-  FORK_REPO: https://github.com/BrownNPC/Raylib-Go-Wasm
+  # Pin the pure-Go WebGL fork so builds are reproducible. This is our own
+  # fork of BrownNPC/Raylib-Go-Wasm, so upstream deleting or force-pushing
+  # their (single-commit) repo can't break our builds.
+  FORK_REPO: https://github.com/Searle/Raylib-Go-Wasm
   FORK_COMMIT: 9ae8b5bb90ca59cc319e9ce6b123c0c29b0588da
 
 jobs:
