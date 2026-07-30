@@ -104,6 +104,29 @@ changelog — only things that will save time or prevent repeating mistakes.
   `RESOURCE.001` = `8bb6c99e9129806b5089a39d24228a36`. `RESOURCE.001` on the
   disk itself is a 35-byte stub; the real data is only in `RESOURCE.00$`.
 
+## Data quirks / dead references
+
+- **`FIRE.TTM` is an orphaned/prototype script — do not try to render it.** It
+  `LOAD_IMAGE`s `FLAME.BMP` and `FLURRY.BMP`, neither of which exists in
+  `RESOURCE.001` (the `FLAME.BMP` string appears *only* inside FIRE.TTM's own
+  bytecode; no BMP resource, no MAP entry). Nothing — no ADS script, no Go
+  code — ever invokes `FIRE.TTM`. The fireplace you actually see is
+  **`MJFIRE.TTM`** (played via `adsPlaySingleTtm("MJFIRE.TTM")`, main.go),
+  which draws the six present `FIRE*.BMP` (`FIRE`, `FIRE1`–`FIRE5`). Conclusion:
+  the art was renamed `FLAME→FIRE` before release and the old TTM was left in
+  the data. Skip FIRE.TTM in any batch extraction; it's original-data cruft,
+  confirmed present byte-identically in the Win32 build too.
+
+- **The Win32 `Screen Antics.scr` ships our exact game data — no better art.**
+  The redistributed installer (`johnnycastaway.exe`, NSIS) contains
+  `Screen Antics.scr`, a UPX-packed Delphi/Borland Win32 PE. After `upx -d`, it
+  embeds `RESOURCE.MAP` and `RESOURCE.001` **verbatim, byte-for-byte identical
+  to ours** (16-color 4bpp, 640×480, magenta `0xa8,0x00,0xa8` key). No
+  `RESOURCE.002+`, no hi-color assets — the only extra bitmap is a 48×48 24bpp
+  app icon. So the Win32 port differs from ours only in engine, not assets;
+  there is nothing prettier to recover. (Static extraction only — the untrusted
+  exe was never executed; it's Win32, so DOSBox wouldn't run it regardless.)
+
 ## CI / Pages
 
 - `.github/workflows/pages.yml` builds wasm + deploys to Pages on push to
