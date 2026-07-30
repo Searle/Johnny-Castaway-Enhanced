@@ -104,6 +104,38 @@ changelog — only things that will save time or prevent repeating mistakes.
   `RESOURCE.001` = `8bb6c99e9129806b5089a39d24228a36`. `RESOURCE.001` on the
   disk itself is a 35-byte stub; the real data is only in `RESOURCE.00$`.
 
+## Backdrops (SCR) are top-aligned at native size, never stretched
+
+- Scene backdrops are **not all 640×480**. `ISLETEMP.SCR` (the island backdrop
+  ~31 of 40 TTMs `LOAD_SCREEN`) is **640×350**; `SUZBEACH.SCR` is 640×480. The
+  engine (`grLoadScreen`) clears the target to **black**, then draws the SCR at
+  its **native size, top-left (y=0)** — the area below a short backdrop stays
+  black (the screensaver shows the desktop there). It is NEVER scaled to fill.
+- Scene sprite coordinates are authored against that top-aligned backdrop. If a
+  renderer stretches a 350-tall backdrop to 480 (e.g. Canvas `drawImage(bg,0,0,
+  W,H)`), the baked shoreline moves down ~1.37× while sprites stay at unscaled
+  coords → characters float "on the water." This bit the TS port; fix was to
+  draw the background 1:1 top-aligned over a black fill.
+- The island itself sits at trunk x≈450 both in ISLETEMP and in the Go
+  `islandInit` sprite build (trunk sprite raw x=442) — the two island systems
+  agree horizontally, so horizontal drift is usually a positioning bug, vertical
+  drift is usually the stretch bug above.
+
+## Island positioning (grDx/grDy) — sprites and backdrop always share it
+
+- A scene's sprite offset and the island backdrop offset are ALWAYS the same
+  `grDx`, so Johnny stays on the island wherever it's placed. `main.go`:
+  `ttmDx = islandState.xPos + (LEFT_ISLAND ? 272 : 0)`. VARPOS scenes get a
+  negative random `xPos` (~ -114..-222) applied to BOTH; LEFT_ISLAND scenes net
+  to `-272 + 272 = 0`; plain scenes are 0. So the net sprite offset is 0 for
+  LEFT_ISLAND/plain, and a shared negative shift for VARPOS.
+- Consequence for a static-backdrop port (can't reposition the baked island):
+  the only offset that keeps sprites aligned is **grDx = 0**. Do NOT add +272
+  for "date" scenes — SMDATE's MARY.ADS entry (tag 1/24) is VARPOS, not
+  LEFT_ISLAND, and LEFT_ISLAND nets to 0 anyway. Correct VARPOS positioning
+  needs the story calendar (`story.go`) AND redrawing the island at the chosen
+  xPos, not the baked ISLETEMP.
+
 ## Data quirks / dead references
 
 - **`FIRE.TTM` is an orphaned/prototype script — do not try to render it.** It

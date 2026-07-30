@@ -146,11 +146,15 @@ export class Canvas2DRenderer implements Renderer {
   }
 
   present(): void {
+    // Black fill first: backgrounds are often shorter than 480 (ISLETEMP.SCR is
+    // 640x350) and must be drawn 1:1, top-left aligned — NOT stretched to fill.
+    // grLoadScreen does exactly this (ClearBackground black, then DrawTexture at
+    // y=0 at native size). Stretching decouples scene sprites, drawn at their
+    // unscaled coords, from the baked shoreline — which put Johnny "on water".
+    this.out.fillStyle = "#000";
+    this.out.fillRect(0, 0, this.width, this.height);
     if (this.background) {
-      this.out.drawImage(this.background, 0, 0, this.width, this.height);
-    } else {
-      this.out.fillStyle = "#000";
-      this.out.fillRect(0, 0, this.width, this.height);
+      this.out.drawImage(this.background, 0, 0);
     }
     for (const layer of this.layers) {
       this.out.drawImage(layer.canvas, 0, 0);
