@@ -41,16 +41,17 @@ async function loadScene(entry: IndexEntry, tag: number) {
   }
 }
 
-// Populate the tag dropdown for a TTM and select `preferred` (or its first tag).
+// Populate the tag dropdown for a TTM and select `preferred` (or the entry's
+// default drawing tag — which skips bootstrap tags that only load + PURGE).
 function fillTags(entry: IndexEntry, preferred?: number) {
   tagSelect.innerHTML = "";
   for (const t of entry.tags) {
     const opt = document.createElement("option");
     opt.value = String(t);
-    opt.textContent = String(t);
+    opt.textContent = t === entry.defaultTag ? `${t} (default)` : String(t);
     tagSelect.append(opt);
   }
-  const tag = preferred ?? entry.tags[0];
+  const tag = preferred ?? entry.defaultTag ?? entry.tags[0];
   tagSelect.value = String(tag);
   return tag;
 }

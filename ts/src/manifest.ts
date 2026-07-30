@@ -37,6 +37,7 @@ export interface IndexEntry {
   name: string; // "MJJOG.TTM"
   dir: string; // subdir under the anim root
   tags: number[]; // scene entry tags
+  defaultTag: number; // first tag that draws (skips bootstrap tags)
   sheets: number;
 }
 export interface AnimIndex {

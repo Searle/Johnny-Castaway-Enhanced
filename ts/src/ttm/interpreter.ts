@@ -53,12 +53,20 @@ export class TtmThread {
     this.renderer = renderer;
     this.palette = manifest.palette ?? [];
     this.buildTags();
-    this.runPrologue();
-    if (this.tags.length > 0) {
-      const tag = startTag ?? this.tags[0].id;
-      const target = this.findTag(tag);
-      this.ip = target >= 0 ? target : this.ip;
-    }
+
+    // Fast-forward from the file start to the chosen scene tag, executing the
+    // real op stream so LOAD_IMAGE / SET_BMP_SLOT / SET_COLORS / LOAD_SCREEN run
+    // in true script order — but suppressing visible drawing and never waiting
+    // on frame timers. This is what makes slot state correct for scenes that
+    // reuse a BMP slot for different sheets (e.g. SMDATE.TTM cycles slots 0-5
+    // through many SMDATE*.BMP): a flat "pre-scan all loads, last wins" pass got
+    // the slots wrong, drawing sprites from the wrong sheet (Johnny mispositioned
+    // "on the water"). Replaying in order matches how the real engine arrives at
+    // a scene, where every prior load has already executed.
+    const target =
+      this.tags.length > 0 ? this.findTag(startTag ?? this.tags[0].id) : -1;
+    if (target >= 0) this.fastForwardTo(target);
+
     // Enter the scene fresh: run its first frame on the very next tick.
     this.timer = 0;
     this.nextGoto = -1;
@@ -72,33 +80,25 @@ export class TtmThread {
     return this.tags.map((t) => t.id);
   }
 
-  // runPrologue binds resources before the scene runs. In the real engine the
-  // ADS script sequences scene tags so that whichever tag loads a BMP runs
-  // before any tag that draws from it — the LOAD_IMAGE / LOAD_SCREEN ops are
-  // frequently INSIDE the first "setup" scene body, not before the first tag
-  // (e.g. MJBATH loads MJBATH.BMP into slot 0 just after TAG 42). Without an
-  // ADS script we can't know that ordering, so we conservatively pre-execute
-  // every resource-binding op once, in file order. These binds are idempotent
-  // (they just point a slot at a sheet), so replaying them up front is safe and
-  // gives every scene its sprites. Drawing/timer/flow ops are skipped here.
-  private runPrologue(): void {
-    for (const raw of this.ops) {
-      switch (raw.op) {
-        case Op.SET_BMP_SLOT:
-          this.selectedBmpSlot = raw.args?.[0] ?? 0;
-          break;
-        case Op.LOAD_IMAGE:
-          this.bmpSlots[this.selectedBmpSlot] =
-            this.sheets.get((raw.str ?? "").toUpperCase()) ?? null;
-          break;
-        case Op.LOAD_SCREEN: {
-          const sheet = this.sheets.get((raw.str ?? "").toUpperCase());
-          this.renderer.setBackground(sheet?.frames[0] ?? null);
-          break;
-        }
-      }
+  // When true, execOne runs state-changing opcodes (loads, slot/color/clip
+  // selection, control flow) but skips anything visible or timing-related. Used
+  // by fastForwardTo to reach a scene with correct engine state.
+  private suppressDraw = false;
+
+  // fastForwardTo runs the op stream from ip=0 up to (not including) targetIp,
+  // executing loads/state in true order while suppressing drawing and timing.
+  // Control-flow opcodes (GOTO/PURGE/UPDATE) are stepped over linearly — we want
+  // a straight scan of everything the file does before the target scene, not to
+  // follow jumps (which would loop forever).
+  private fastForwardTo(targetIp: number): void {
+    this.suppressDraw = true;
+    this.ip = 0;
+    while (this.ip < targetIp && this.ip < this.ops.length) {
+      this.execOne();
     }
-    this.selectedBmpSlot = 0;
+    this.suppressDraw = false;
+    this.ip = targetIp;
+    this.nextGoto = -1;
   }
 
   // buildTags mirrors ttmLoadTTM's tag scan: TAG/LOCAL_TAG opcodes record a
@@ -205,11 +205,12 @@ export class TtmThread {
         }
 
         case Op.CLEAR_SCREEN:
-          this.renderer.clearScreen();
+          if (!this.suppressDraw) this.renderer.clearScreen();
           break;
 
         case Op.DRAW_SPRITE:
         case Op.DRAW_SPRITE_FLIP: {
+          if (this.suppressDraw) break;
           // args: x, y, spriteNo, imageNo
           const [x, y, spriteNo, imageNo] = a;
           const sheet = this.bmpSlots[imageNo];
@@ -226,13 +227,16 @@ export class TtmThread {
           break;
 
         case Op.DRAW_LINE:
-          this.renderer.drawLine(s16(a[0]), s16(a[1]), s16(a[2]), s16(a[3]), this.color(this.fgColor));
+          if (!this.suppressDraw)
+            this.renderer.drawLine(s16(a[0]), s16(a[1]), s16(a[2]), s16(a[3]), this.color(this.fgColor));
           break;
         case Op.DRAW_RECT:
           // args: x, y, w, h (w/h are unsigned sizes)
-          this.renderer.drawRect(s16(a[0]), s16(a[1]), a[2], a[3], this.color(this.fgColor));
+          if (!this.suppressDraw)
+            this.renderer.drawRect(s16(a[0]), s16(a[1]), a[2], a[3], this.color(this.fgColor));
           break;
         case Op.DRAW_CIRCLE: {
+          if (this.suppressDraw) break;
           // args: x, y, w, h — filled with bgColor, outlined with fgColor.
           const fg = this.color(this.fgColor);
           const bg = this.color(this.bgColor);
@@ -240,7 +244,7 @@ export class TtmThread {
           break;
         }
         case Op.DRAW_PIXEL:
-          this.renderer.drawPixel(s16(a[0]), s16(a[1]), this.color(this.fgColor));
+          if (!this.suppressDraw) this.renderer.drawPixel(s16(a[0]), s16(a[1]), this.color(this.fgColor));
           break;
 
         case Op.SET_CLIP_ZONE: {
@@ -264,8 +268,13 @@ export class TtmThread {
           break;
 
         case Op.PURGE:
-          // With no scene timer in the slice, PURGE loops back to the previous
-          // tag (ttm.go: sceneTimer != 0 branch), giving us a clean repeat.
+          // In the real engine PURGE ends the scene segment and the ADS script
+          // decides what plays next. Without ADS, we loop back to the current
+          // scene's previous tag so a self-contained animation scene repeats
+          // (ttm.go's sceneTimer != 0 branch). Bootstrap tags that PURGE with no
+          // drawing (e.g. SUZYCITY tag 1: load BMPs → PURGE → hand off to tag 2)
+          // would just re-loop uselessly here — the browser sidesteps that by
+          // defaulting to each TTM's first *drawing* tag (index defaultTag).
           this.nextGoto = this.findPreviousTag(this.ip);
           if (this.nextGoto < 0) this.done = true;
           break;

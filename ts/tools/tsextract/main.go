@@ -79,10 +79,14 @@ func extractAll(res *resources, ttmPalette [16][3]uint8, out string) {
 	sort.Strings(names)
 
 	type indexEntry struct {
-		Name   string `json:"name"`   // e.g. "MJJOG.TTM"
-		Dir    string `json:"dir"`    // subdir under out, e.g. "MJJOG.TTM"
-		Tags   []int  `json:"tags"`   // scene entry tags
-		Sheets int    `json:"sheets"` // sprite sheet count
+		Name string `json:"name"` // e.g. "MJJOG.TTM"
+		Dir  string `json:"dir"`  // subdir under out, e.g. "MJJOG.TTM"
+		Tags []int  `json:"tags"` // scene entry tags
+		// DefaultTag is the first tag whose body actually draws a sprite, so the
+		// browser skips "bootstrap" tags that only load resources then PURGE
+		// (e.g. SUZYCITY tag 1 loads BMPs and hands off to the drawing tag 2).
+		DefaultTag int `json:"defaultTag"`
+		Sheets     int `json:"sheets"` // sprite sheet count
 	}
 	var index []indexEntry
 	var skipped []string
@@ -95,14 +99,34 @@ func extractAll(res *resources, ttmPalette [16][3]uint8, out string) {
 			continue
 		}
 		var tags []int
-		for _, op := range m.Ops {
-			if op.Op == 0x1111 || op.Op == 0x1101 { // TAG / LOCAL_TAG
-				if len(op.Args) > 0 {
-					tags = append(tags, int(op.Args[0]))
-				}
+		defaultTag := -1
+		curTag := -1
+		curDraws := false
+		flush := func() {
+			// When leaving a tag's body, if it drew and we haven't picked a
+			// default yet, this is the first drawing tag.
+			if defaultTag < 0 && curTag >= 0 && curDraws {
+				defaultTag = curTag
 			}
 		}
-		index = append(index, indexEntry{Name: n, Dir: n, Tags: tags, Sheets: len(m.Sheets)})
+		for _, op := range m.Ops {
+			switch op.Op {
+			case 0x1111, 0x1101: // TAG / LOCAL_TAG
+				flush()
+				if len(op.Args) > 0 {
+					tags = append(tags, int(op.Args[0]))
+					curTag = int(op.Args[0])
+					curDraws = false
+				}
+			case 0xA504, 0xA524: // DRAW_SPRITE / DRAW_SPRITE_FLIP
+				curDraws = true
+			}
+		}
+		flush()
+		if defaultTag < 0 && len(tags) > 0 {
+			defaultTag = tags[0] // no tag draws (shouldn't happen) — fall back
+		}
+		index = append(index, indexEntry{Name: n, Dir: n, Tags: tags, DefaultTag: defaultTag, Sheets: len(m.Sheets)})
 	}
 
 	ij, err := json.MarshalIndent(struct {
