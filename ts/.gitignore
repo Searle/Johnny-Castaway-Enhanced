@@ -1,0 +1,7 @@
+node_modules/
+dist/
+
+# Pre-extracted game assets — regenerate with:
+#   go run ./tools/tsextract -ttm MJJOG.TTM -out ts/public/anim
+# (kept out of git for the same copyright reasons as assets/RESOURCE.*)
+public/anim/

@@ -1,0 +1,17 @@
+{
+  "name": "johnny-castaway-ts",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "TypeScript/Vite vertical-slice port of the Johnny Castaway screensaver's TTM animation player (Canvas2D).",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "extract": "cd tools/tsextract && go run ."
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "vite": "^5.4.0"
+  }
+}

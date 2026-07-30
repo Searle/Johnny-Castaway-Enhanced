@@ -1,0 +1,36 @@
+// TTM opcodes, transcribed from the Go interpreter (ttm.go ttmPlay switch).
+// Only the subset the vertical slice actually executes is named; the rest are
+// decoded (so the stream stays aligned) but ignored at runtime.
+
+export const Op = {
+  CLEAR_IMGSLOT: 0x0080,
+  PURGE: 0x0110,
+  UPDATE: 0x0ff0,
+  SET_DELAY: 0x1021,
+  SET_BMP_SLOT: 0x1051,
+  SET_PALETTE_SLOT: 0x1061,
+  LOCAL_TAG: 0x1101,
+  TAG: 0x1111,
+  UNKNOWN_1: 0x1121,
+  GOTO_TAG: 0x1201,
+  SET_COLORS: 0x2002,
+  SET_FRAME1: 0x2012,
+  TIMER: 0x2022,
+  SET_CLIP_ZONE: 0x4004,
+  COPY_ZONE_TO_BG: 0x4204,
+  SAVE_IMAGE1: 0x4214,
+  DRAW_PIXEL: 0xa002,
+  SAVE_ZONE: 0xa054,
+  RESTORE_ZONE: 0xa064,
+  DRAW_LINE: 0xa0a4,
+  DRAW_RECT: 0xa104,
+  DRAW_CIRCLE: 0xa404,
+  DRAW_SPRITE: 0xa504,
+  DRAW_SPRITE_FLIP: 0xa524,
+  CLEAR_SCREEN: 0xa601,
+  DRAW_SCREEN: 0xb606,
+  PLAY_SAMPLE: 0xc051,
+  LOAD_SCREEN: 0xf01f,
+  LOAD_IMAGE: 0xf02f,
+  LOAD_PALETTE: 0xf05f,
+} as const;
