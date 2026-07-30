@@ -6,8 +6,8 @@ extractor, and its build — lives under this `ts/` directory. The only thing it
 reaches outside for is the (git-ignored, copyright) game data in the repo-root
 `assets/`, shared with the Go build.
 
-**Experimental** — plays a single TTM script (default `MJJOG.TTM`) entered at one
-scene tag, not the full ADS scene scheduler.
+**Experimental** — plays a single TTM script entered at one scene tag, with a
+scene browser to pick any animation + tag. Not the full ADS scene scheduler.
 
 ## Layout
 
@@ -26,8 +26,10 @@ ts/
 ```
 
 The interpreter works in the original 640×480 virtual space; the renderer maps
-it onto the canvas. Widescreen scaling, clip zones, and multi-thread scenes from
-the Go engine are intentionally out of scope.
+it onto the canvas. It handles sprites (+ flip), the primitives
+(line/rect/circle/pixel with `SET_COLORS`), and rectangular clip zones.
+Widescreen scaling, multi-thread scenes, and the bake-to-background opcodes
+(`SAVE_IMAGE`/`COPY_ZONE_TO_BG`) are still out of scope.
 
 ## Game data
 
@@ -36,9 +38,14 @@ copyright reasons as the root `assets/`). Regenerate them with the bundled
 extractor (run from `ts/`):
 
 ```sh
-npm run extract                        # default MJJOG.TTM → public/anim
-npm run extract -- -ttm SHARK1.TTM     # any other TTM (pass -- then flags)
+npm run extract -- -all                # ALL TTMs → public/anim/<TTM>/ + index.json
+npm run extract                        # single MJJOG.TTM → public/anim (legacy)
+npm run extract -- -ttm SHARK1.TTM     # a single named TTM
 ```
+
+The scene browser (the `animation` / `tag` dropdowns in the app) needs the
+`-all` extraction — it reads `public/anim/index.json` to list every animation
+and its scene tags.
 
 `tools/tsextract` is a stdlib-only, raylib-free Go module — a port of the repo's
 resource pipeline (RESOURCE.MAP/001 parse → LZW/RLE decompress → 4bpp+palette
@@ -53,9 +60,10 @@ the data; the working fireplace is `MJFIRE.TTM`. See the repo `INSIGHTS.md`.)
 
 ```sh
 npm install
-npm run dev      # http://localhost:5173
-npm run build    # tsc typecheck + vite production build → dist/
+npm run extract -- -all   # one-time: build the asset catalog the browser needs
+npm run dev               # http://localhost:5173
+npm run build             # tsc typecheck + vite production build → dist/
 ```
 
-Pick a scene entry point with `?tag=<n>` (the tag list is shown in the on-page
-HUD); default is the TTM's first tag.
+Use the on-page dropdowns to pick an animation and scene tag, or deep-link with
+`?anim=MJJOG.TTM&tag=1`.

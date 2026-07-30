@@ -1,70 +1,127 @@
-import { loadAnimation } from "./manifest";
+import { loadIndex, loadAnimation, type AnimIndex, type IndexEntry } from "./manifest";
 import { Canvas2DRenderer } from "./render/canvas2d";
 import { TtmThread } from "./ttm/interpreter";
 
 // One TTM "tick" is ~33ms in the original (the ADS loop's per-tick sleep).
-// Driving the interpreter at that rate makes SET_DELAY/TIMER values map to the
-// same real-world durations the screensaver used.
 const TICK_MS = 33;
 
-// Which pre-extracted animation to play (see tools/tsextract). Overridable via
-// ?anim=<dir> for quick experimentation.
-const params = new URLSearchParams(location.search);
-const animDir = params.get("anim") ?? "anim";
-// Optional scene entry point; the real engine's ADS script picks this. Defaults
-// to the TTM's first tag.
-const startTagParam = params.get("tag");
-const startTag = startTagParam != null ? Number(startTagParam) : undefined;
+// Root of the batch-extracted assets (tsextract -all writes anim/<TTM>/…).
+const ANIM_ROOT = `${import.meta.env.BASE_URL}anim`;
+
+const canvas = document.getElementById("screen") as HTMLCanvasElement;
+const hud = document.getElementById("hud") as HTMLDivElement;
+const ttmSelect = document.getElementById("ttm") as HTMLSelectElement;
+const tagSelect = document.getElementById("tag") as HTMLSelectElement;
+const restartBtn = document.getElementById("restart") as HTMLButtonElement;
+
+const renderer = new Canvas2DRenderer(canvas);
+
+// Mutable playback state. The rAF loop reads `thread`; loaders swap it. A load
+// token guards against overlapping async loads (rapid dropdown changes).
+let thread: TtmThread | null = null;
+let frames = 0;
+let loadToken = 0;
+
+async function loadScene(entry: IndexEntry, tag: number) {
+  const token = ++loadToken;
+  thread = null;
+  hud.textContent = `loading ${entry.name}…`;
+  try {
+    const { manifest, sheets } = await loadAnimation(`${ANIM_ROOT}/${entry.dir}`);
+    if (token !== loadToken) return; // superseded by a newer selection
+    renderer.clearClip();
+    renderer.setBackground(null);
+    renderer.clearScreen();
+    thread = new TtmThread(manifest, sheets, renderer, tag);
+    frames = 0;
+    renderer.present();
+  } catch (err) {
+    if (token === loadToken) hud.textContent = `error: ${(err as Error).message}`;
+    console.error(err);
+  }
+}
+
+// Populate the tag dropdown for a TTM and select `preferred` (or its first tag).
+function fillTags(entry: IndexEntry, preferred?: number) {
+  tagSelect.innerHTML = "";
+  for (const t of entry.tags) {
+    const opt = document.createElement("option");
+    opt.value = String(t);
+    opt.textContent = String(t);
+    tagSelect.append(opt);
+  }
+  const tag = preferred ?? entry.tags[0];
+  tagSelect.value = String(tag);
+  return tag;
+}
+
+function currentEntry(index: AnimIndex): IndexEntry {
+  return index.ttms.find((t) => t.name === ttmSelect.value) ?? index.ttms[0];
+}
 
 async function main() {
-  const canvas = document.getElementById("screen") as HTMLCanvasElement;
-  const hud = document.getElementById("hud") as HTMLDivElement;
+  const index = await loadIndex(ANIM_ROOT);
+  if (!index.ttms.length) throw new Error("no animations in index.json — run `npm run extract -- -all`");
 
-  const renderer = new Canvas2DRenderer(canvas);
+  // Populate the animation dropdown.
+  for (const t of index.ttms) {
+    const opt = document.createElement("option");
+    opt.value = t.name;
+    opt.textContent = `${t.name}  (${t.tags.length} tags)`;
+    ttmSelect.append(opt);
+  }
 
-  hud.textContent = "loading assets…";
-  const { manifest, sheets } = await loadAnimation(`${import.meta.env.BASE_URL}${animDir}`);
-  const thread = new TtmThread(manifest, sheets, renderer, startTag);
+  // Optional deep-link: ?anim=MJJOG.TTM&tag=1
+  const params = new URLSearchParams(location.search);
+  const wantAnim = params.get("anim");
+  const wantTag = params.get("tag") != null ? Number(params.get("tag")) : undefined;
+  if (wantAnim && index.ttms.some((t) => t.name === wantAnim.toUpperCase())) {
+    ttmSelect.value = wantAnim.toUpperCase();
+  }
 
-  const usedTag = startTag ?? thread.tagIds[0];
-  hud.textContent = `${manifest.ttm} — tag ${usedTag} (of ${thread.tagIds.join(",")})`;
+  const entry0 = currentEntry(index);
+  const tag0 = fillTags(entry0, wantTag);
+  await loadScene(entry0, tag0);
 
+  ttmSelect.addEventListener("change", () => {
+    const entry = currentEntry(index);
+    const tag = fillTags(entry);
+    void loadScene(entry, tag);
+  });
+  tagSelect.addEventListener("change", () => {
+    void loadScene(currentEntry(index), Number(tagSelect.value));
+  });
+  restartBtn.addEventListener("click", () => {
+    void loadScene(currentEntry(index), Number(tagSelect.value));
+  });
+
+  // Single shared render loop.
   let acc = 0;
   let last = performance.now();
-  let frames = 0;
-
   function loop(now: number) {
     acc += now - last;
     last = now;
-
-    let changed = false;
-    // Advance whole ticks; guard against huge catch-ups after a tab switch.
-    let budget = 10;
-    while (acc >= TICK_MS && budget-- > 0) {
-      acc -= TICK_MS;
-      if (thread.tick()) changed = true;
-    }
-
-    if (changed) {
-      renderer.present();
-      frames++;
-      hud.textContent = `${manifest.ttm} — frame ${frames}`;
-    }
-
-    if (thread.isDone) {
-      hud.textContent = `${manifest.ttm} — done`;
-      return;
+    if (thread) {
+      let changed = false;
+      let budget = 10; // cap catch-up after a tab switch
+      while (acc >= TICK_MS && budget-- > 0) {
+        acc -= TICK_MS;
+        if (thread.tick()) changed = true;
+      }
+      if (changed) {
+        renderer.present();
+        frames++;
+        hud.textContent = `${ttmSelect.value} — tag ${tagSelect.value} — frame ${frames}${thread.isDone ? " (done)" : ""}`;
+      }
+    } else {
+      acc = 0; // don't accumulate ticks while a scene is loading
     }
     requestAnimationFrame(loop);
   }
-
-  // Draw the initial background/black frame before the first tick lands.
-  renderer.present();
   requestAnimationFrame(loop);
 }
 
 main().catch((err) => {
   console.error(err);
-  const hud = document.getElementById("hud");
-  if (hud) hud.textContent = `error: ${err.message ?? err}`;
+  hud.textContent = `error: ${err.message ?? err}`;
 });

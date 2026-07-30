@@ -19,6 +19,7 @@ export interface Op {
 
 export interface Manifest {
   ttm: string;
+  palette: string[]; // 16 CSS colors, indexed by color index & 0x0f
   screens?: ManifestSheet[];
   sheets: ManifestSheet[];
   ops: Op[];
@@ -29,6 +30,25 @@ export interface Manifest {
 export interface LoadedSheet {
   name: string;
   frames: ImageBitmap[];
+}
+
+// index.json (from `tsextract -all`): the catalog the scene browser lists.
+export interface IndexEntry {
+  name: string; // "MJJOG.TTM"
+  dir: string; // subdir under the anim root
+  tags: number[]; // scene entry tags
+  sheets: number;
+}
+export interface AnimIndex {
+  ttms: IndexEntry[];
+  skipped?: string[];
+}
+
+export function loadIndex(baseUrl: string): Promise<AnimIndex> {
+  return fetch(`${baseUrl}/index.json`).then((r) => {
+    if (!r.ok) throw new Error(`index.json: HTTP ${r.status}`);
+    return r.json();
+  });
 }
 
 // Load the manifest and every referenced PNG (screens + sprite sheets) as

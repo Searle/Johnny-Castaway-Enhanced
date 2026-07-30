@@ -32,11 +32,13 @@ import (
 	"image/png"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
 func main() {
-	ttmName := flag.String("ttm", "MJJOG.TTM", "TTM resource name to extract")
+	ttmName := flag.String("ttm", "MJJOG.TTM", "TTM resource name to extract (single mode)")
+	all := flag.Bool("all", false, "extract every TTM into <out>/<TTM>/ subdirs and write index.json (for the scene browser)")
 	assets := flag.String("assets", "../../../assets", "dir holding RESOURCE.MAP and RESOURCE.001")
 	out := flag.String("out", "../../public/anim", "output dir for PNGs + manifest.json")
 	flag.Parse()
@@ -54,9 +56,72 @@ func main() {
 	}
 	ttmPalette := buildPalette(pal)
 
-	ttm, ok := res.ttms[strings.ToUpper(*ttmName)]
+	if *all {
+		extractAll(res, ttmPalette, *out)
+		return
+	}
+
+	m, err := extractOne(res, ttmPalette, strings.ToUpper(*ttmName), *out)
+	must(err, "extract "+*ttmName)
+	fmt.Printf("wrote %d opcodes, %d sprite sheets to %s\n", len(m.Ops), len(m.Sheets), *out)
+}
+
+// extractAll extracts every TTM into out/<NAME>/ and writes out/index.json
+// listing what succeeded (name, tags, sheet count). TTMs that reference missing
+// resources (e.g. the orphaned FIRE.TTM → FLAME.BMP) are skipped with a note.
+func extractAll(res *resources, ttmPalette [16][3]uint8, out string) {
+	must(os.MkdirAll(out, 0o755), "mkdir out")
+
+	names := make([]string, 0, len(res.ttms))
+	for n := range res.ttms {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+
+	type indexEntry struct {
+		Name   string `json:"name"`   // e.g. "MJJOG.TTM"
+		Dir    string `json:"dir"`    // subdir under out, e.g. "MJJOG.TTM"
+		Tags   []int  `json:"tags"`   // scene entry tags
+		Sheets int    `json:"sheets"` // sprite sheet count
+	}
+	var index []indexEntry
+	var skipped []string
+
+	for _, n := range names {
+		m, err := extractOne(res, ttmPalette, n, filepath.Join(out, n))
+		if err != nil {
+			skipped = append(skipped, fmt.Sprintf("%s (%v)", n, err))
+			fmt.Fprintf(os.Stderr, "[tsextract] skip %s: %v\n", n, err)
+			continue
+		}
+		var tags []int
+		for _, op := range m.Ops {
+			if op.Op == 0x1111 || op.Op == 0x1101 { // TAG / LOCAL_TAG
+				if len(op.Args) > 0 {
+					tags = append(tags, int(op.Args[0]))
+				}
+			}
+		}
+		index = append(index, indexEntry{Name: n, Dir: n, Tags: tags, Sheets: len(m.Sheets)})
+	}
+
+	ij, err := json.MarshalIndent(struct {
+		TTMs    []indexEntry `json:"ttms"`
+		Skipped []string     `json:"skipped,omitempty"`
+	}{index, skipped}, "", "  ")
+	must(err, "marshal index")
+	must(os.WriteFile(filepath.Join(out, "index.json"), ij, 0o644), "write index.json")
+
+	fmt.Printf("extracted %d/%d TTMs (%d skipped) → %s/index.json\n",
+		len(index), len(names), len(skipped), out)
+}
+
+// extractOne decodes one TTM and writes its PNGs + manifest.json into outDir.
+// Returns an error (rather than exiting) so batch mode can skip bad TTMs.
+func extractOne(res *resources, ttmPalette [16][3]uint8, ttmName, outDir string) (*Manifest, error) {
+	ttm, ok := res.ttms[ttmName]
 	if !ok {
-		fatal("TTM %q not found (have %d TTMs)", *ttmName, len(res.ttms))
+		return nil, fmt.Errorf("TTM not found")
 	}
 
 	ops := decodeTTM(ttm.data)
@@ -80,21 +145,31 @@ func main() {
 		}
 	}
 	if len(bmpNames) == 0 {
-		fatal("TTM %s loads no BMPs (no LOAD_IMAGE opcode)", *ttmName)
+		return nil, fmt.Errorf("no LOAD_IMAGE opcode")
 	}
 
-	must(os.MkdirAll(*out, 0o755), "mkdir out")
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		return nil, err
+	}
 
-	manifest := Manifest{TTM: strings.ToUpper(*ttmName), Ops: ops}
+	palette := make([]string, 16)
+	for i, c := range ttmPalette {
+		// ttmPalette is stored B,G,R (see buildPalette); emit as #rrggbb.
+		palette[i] = fmt.Sprintf("#%02x%02x%02x", c[2], c[1], c[0])
+	}
+
+	manifest := Manifest{TTM: ttmName, Palette: palette, Ops: ops}
 
 	for _, sn := range scrNames {
 		scr, ok := res.scrs[sn]
 		if !ok {
-			fatal("SCR %q referenced by %s not found", sn, *ttmName)
+			return nil, fmt.Errorf("SCR %q not found", sn)
 		}
 		img := decodeScr(scr, ttmPalette)
 		file := strings.TrimSuffix(sn, ".SCR") + ".scr.png"
-		must(writePNG(filepath.Join(*out, file), img), "write "+file)
+		if err := writePNG(filepath.Join(outDir, file), img); err != nil {
+			return nil, err
+		}
 		manifest.Screens = append(manifest.Screens, ManifestSheet{
 			Name:    sn,
 			Sprites: []ManifestSprite{{File: file, W: scr.width, H: scr.height}},
@@ -104,29 +179,37 @@ func main() {
 	for _, bn := range bmpNames {
 		bmp, ok := res.bmps[bn]
 		if !ok {
-			fatal("BMP %q referenced by %s not found", bn, *ttmName)
+			return nil, fmt.Errorf("BMP %q not found", bn)
 		}
 		sheet := decodeBmp(bmp, ttmPalette)
 		ms := ManifestSheet{Name: bn, Sprites: make([]ManifestSprite, len(sheet))}
 		for i, spr := range sheet {
 			file := fmt.Sprintf("%s.%d.png", strings.TrimSuffix(bn, ".BMP"), i)
-			must(writePNG(filepath.Join(*out, file), spr), "write "+file)
+			if err := writePNG(filepath.Join(outDir, file), spr); err != nil {
+				return nil, err
+			}
 			ms.Sprites[i] = ManifestSprite{File: file, W: spr.Bounds().Dx(), H: spr.Bounds().Dy()}
 		}
 		manifest.Sheets = append(manifest.Sheets, ms)
 	}
 
 	mf, err := json.MarshalIndent(manifest, "", "  ")
-	must(err, "marshal manifest")
-	must(os.WriteFile(filepath.Join(*out, "manifest.json"), mf, 0o644), "write manifest")
-
-	fmt.Printf("wrote %d opcodes, %d sprite sheets to %s\n", len(ops), len(manifest.Sheets), *out)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(filepath.Join(outDir, "manifest.json"), mf, 0o644); err != nil {
+		return nil, err
+	}
+	return &manifest, nil
 }
 
 // ---- manifest types ----
 
 type Manifest struct {
-	TTM     string          `json:"ttm"`
+	TTM string `json:"ttm"`
+	// Palette is the 16 draw colours as "#rrggbb", indexed by colour index &
+	// 0x0f — used by the primitive opcodes (DRAW_LINE/RECT/CIRCLE/PIXEL).
+	Palette []string        `json:"palette"`
 	Screens []ManifestSheet `json:"screens,omitempty"`
 	Sheets  []ManifestSheet `json:"sheets"`
 	Ops     []Op            `json:"ops"`

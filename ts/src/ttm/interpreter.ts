@@ -33,6 +33,9 @@ export class TtmThread {
   // Per-thread engine state set by opcodes.
   private selectedBmpSlot = 0;
   private bmpSlots: (LoadedSheet | null)[] = new Array(6).fill(null);
+  private readonly palette: string[];
+  private fgColor = 0; // SET_COLORS args — palette indices for primitives
+  private bgColor = 0;
 
   // In the real engine the ADS scheduler enters a TTM at the byte offset of a
   // chosen scene *tag* (ads.go sets ip = ttmFindTag(sceneRootTag)), not at 0.
@@ -48,6 +51,7 @@ export class TtmThread {
     this.ops = manifest.ops;
     this.sheets = sheets;
     this.renderer = renderer;
+    this.palette = manifest.palette ?? [];
     this.buildTags();
     this.runPrologue();
     if (this.tags.length > 0) {
@@ -216,6 +220,45 @@ export class TtmThread {
           break;
         }
 
+        case Op.SET_COLORS:
+          this.fgColor = a[0];
+          this.bgColor = a[1];
+          break;
+
+        case Op.DRAW_LINE:
+          this.renderer.drawLine(s16(a[0]), s16(a[1]), s16(a[2]), s16(a[3]), this.color(this.fgColor));
+          break;
+        case Op.DRAW_RECT:
+          // args: x, y, w, h (w/h are unsigned sizes)
+          this.renderer.drawRect(s16(a[0]), s16(a[1]), a[2], a[3], this.color(this.fgColor));
+          break;
+        case Op.DRAW_CIRCLE: {
+          // args: x, y, w, h — filled with bgColor, outlined with fgColor.
+          const fg = this.color(this.fgColor);
+          const bg = this.color(this.bgColor);
+          this.renderer.drawCircle(s16(a[0]), s16(a[1]), a[2], a[3], bg, fg === bg ? null : fg);
+          break;
+        }
+        case Op.DRAW_PIXEL:
+          this.renderer.drawPixel(s16(a[0]), s16(a[1]), this.color(this.fgColor));
+          break;
+
+        case Op.SET_CLIP_ZONE: {
+          // args: x1, y1, x2, y2 (top-left, bottom-right corners). The
+          // full-screen reset convention (0,0,>=639,>=479) clears the clip
+          // (grSetClipZone). Otherwise scissor to that rect.
+          const x1 = s16(a[0]),
+            y1 = s16(a[1]),
+            x2 = s16(a[2]),
+            y2 = s16(a[3]);
+          if (x1 <= 0 && y1 <= 0 && x2 >= 639 && y2 >= 479) {
+            this.renderer.clearClip();
+          } else {
+            this.renderer.setClip(x1, y1, x2 - x1 + 1, y2 - y1 + 1);
+          }
+          break;
+        }
+
         case Op.GOTO_TAG:
           this.nextGoto = this.findTag(a[0]);
           break;
@@ -227,14 +270,19 @@ export class TtmThread {
           if (this.nextGoto < 0) this.done = true;
           break;
 
-        // Opcodes decoded for alignment but not needed by the slice:
-        // SET_PALETTE_SLOT, SET_COLORS, SET_FRAME1, CLEAR_IMGSLOT, clip/zone,
-        // primitives, PLAY_SAMPLE, LOAD_PALETTE, tag markers. No-op.
+        // Still no-op (decoded for alignment, low impact in the slice):
+        // SET_PALETTE_SLOT, SET_FRAME1, CLEAR_IMGSLOT, SAVE_IMAGE1/ZONE,
+        // COPY_ZONE_TO_BG, DRAW_SCREEN, PLAY_SAMPLE, LOAD_PALETTE, tag markers.
         default:
           break;
       }
     }
     return false; // non-UPDATE opcode: frame continues
+  }
+
+  // color resolves a TTM palette index (masked to 0..15) to a CSS color.
+  private color(idx: number): string {
+    return this.palette[idx & 0x0f] ?? "#000000";
   }
 }
 
