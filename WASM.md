@@ -10,6 +10,22 @@ The desktop build is unaffected: it keeps using upstream
 separate module overlay, `go.wasm.mod`, that swaps in the fork with `replace`
 directives — so no source `import` paths or the desktop `go.mod` change.
 
+## Continuous deployment (GitHub Pages)
+
+`.github/workflows/pages.yml` builds this WASM target and publishes it to
+GitHub Pages on every push to `main`/`dev`. It fetches the original graphics
+from the Internet Archive and extracts them at build time (see below), so no
+copyrighted game data lives in the repo. To enable it, set the repository's
+**Settings → Pages → Source** to **GitHub Actions**.
+
+## Game resources (RESOURCE.001)
+
+The screensaver embeds the original Screen Antics resource files, which are not
+committed. `go run ./tools/extract` downloads the copyright-clean install disk
+from the Internet Archive, extracts `RESOURCE.MAP`, and decompresses the
+InstallShield-Z–packed `RESOURCE.001` (PKWARE implode), writing both to
+`assets/` and verifying their MD5s. Requires the system `7z` (p7zip) binary.
+
 ## One-time setup
 
 1. Clone the fork into the repo root (it is git-ignored):

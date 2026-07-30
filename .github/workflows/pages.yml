@@ -1,0 +1,93 @@
+name: Build & deploy WebAssembly to GitHub Pages
+
+# Builds the browser (WebAssembly) build of the screensaver and publishes it to
+# GitHub Pages. The original game graphics are fetched from the Internet
+# Archive's copyright-clean Screen Antics disk image and extracted at build
+# time (see tools/extract) — they are never committed to this repo.
+
+on:
+  push:
+    branches: [main, dev]
+  workflow_dispatch:
+
+# Allow the workflow to publish Pages.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One concurrent deploy at a time; newer pushes cancel older in-progress runs.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+env:
+  # Pin the pure-Go WebGL fork so builds are reproducible.
+  FORK_REPO: https://github.com/BrownNPC/Raylib-Go-Wasm
+  FORK_COMMIT: 9ae8b5bb90ca59cc319e9ce6b123c0c29b0588da
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+
+      - name: Install p7zip (for the resource extractor)
+        run: sudo apt-get update && sudo apt-get install -y p7zip-full
+
+      - name: Vendor the pure-Go WebGL fork
+        run: |
+          git clone --no-checkout "$FORK_REPO" Raylib-Go-Wasm
+          git -C Raylib-Go-Wasm checkout "$FORK_COMMIT"
+
+      - name: Cache the extracted game resources
+        id: cache-assets
+        uses: actions/cache@v4
+        with:
+          path: assets
+          # Bump the suffix to force a re-extract if the extractor changes.
+          key: jc-assets-v1-${{ hashFiles('tools/extract/**') }}
+
+      - name: Extract game resources from the Internet Archive
+        if: steps.cache-assets.outputs.cache-hit != 'true'
+        run: go run ./tools/extract -out assets
+
+      - name: Build WebAssembly
+        run: |
+          GOFLAGS=-mod=mod GOOS=js GOARCH=wasm \
+            go build -modfile=go.wasm.mod -o Raylib-Go-Wasm/index/main.wasm .
+
+      - name: Assemble the site
+        run: |
+          site=_site
+          mkdir -p "$site"
+          # The prebuilt raylib runtime + loader ship in the fork's index dir.
+          cp -r Raylib-Go-Wasm/index/. "$site"/
+          # Our page shell (canvas-fit, audio-gesture, WebGL check) overrides the
+          # fork defaults.
+          cp web/index.html web/index.js "$site"/
+          # Go's wasm loader must match the toolchain that built main.wasm.
+          cp "$(go env GOROOT)/lib/wasm/wasm_exec.js" "$site"/wasm_exec.js
+          ls -la "$site"
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
