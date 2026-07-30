@@ -106,6 +106,11 @@ export class TtmThread {
   // STOP_SCENE / IF_IS_RUNNING checks.
   sceneRootTag = 0;
 
+  // When true, PURGE ends the scene (isDone) instead of looping to the previous
+  // tag. The ADS scheduler sets this so scene chaining works; the standalone
+  // browser leaves it false so single scenes loop for viewing.
+  purgeEnds = false;
+
   // setOrigin sets this thread's grDx/grDy (story positioning).
   setOrigin(dx: number, dy: number): void {
     this.originDx = dx;
@@ -334,15 +339,20 @@ export class TtmThread {
           break;
 
         case Op.PURGE:
-          // In the real engine PURGE ends the scene segment and the ADS script
-          // decides what plays next. Without ADS, we loop back to the current
-          // scene's previous tag so a self-contained animation scene repeats
-          // (ttm.go's sceneTimer != 0 branch). Bootstrap tags that PURGE with no
-          // drawing (e.g. SUZYCITY tag 1: load BMPs → PURGE → hand off to tag 2)
-          // would just re-loop uselessly here — the browser sidesteps that by
-          // defaulting to each TTM's first *drawing* tag (index defaultTag).
-          this.nextGoto = this.findPreviousTag(this.ip);
-          if (this.nextGoto < 0) this.done = true;
+          // PURGE marks the end of a scene segment (ttm.go: with no sceneTimer,
+          // isRunning=2 → scene ends). Two contexts:
+          //  - Under the ADS scheduler (purgeEnds=true): the scene ends so the
+          //    script can chain to the next one via triggered chunks. Without
+          //    this, a scene whose tag ends in PURGE (e.g. MJFISH tag 18) loops
+          //    forever and the ADS never advances.
+          //  - Standalone browser (purgeEnds=false): loop back to the scene's
+          //    previous tag so a self-contained animation repeats on screen.
+          if (this.purgeEnds) {
+            this.done = true;
+          } else {
+            this.nextGoto = this.findPreviousTag(this.ip);
+            if (this.nextGoto < 0) this.done = true;
+          }
           break;
 
         // Still no-op (decoded for alignment, low impact in the slice):

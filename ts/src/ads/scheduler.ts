@@ -83,7 +83,7 @@ export class AdsScheduler {
     this.renderer.resetLayers();
     this.scenes = [];
     this.stopped = false;
-    this.registerChunks();
+    this.registerChunks(entryTag);
     const ip = this.findTag(entryTag);
     if (ip < 0) {
       console.warn(`ADS tag ${entryTag} not found`);
@@ -102,8 +102,13 @@ export class AdsScheduler {
   }
 
   // registerChunks mirrors adsLoad: bookmark the IF_LASTPLAYED / leading
-  // IF_NOT_RUNNING guarded blocks so they can fire when their scene completes.
-  private registerChunks(): void {
+  // IF_NOT_RUNNING guarded chunks so they fire when their (slot,tag) scene
+  // completes. Crucially, bookmarking is enabled ONLY within the ENTRY tag's
+  // region (from `entryTag`'s marker to the next tag marker) — every other tag
+  // toggles it back off. Registering chunks from ALL tags (the earlier bug) let
+  // a completed scene match chunks belonging to unrelated entry sequences,
+  // spawning a runaway pile of scenes.
+  private registerChunks(entryTag: number): void {
     this.chunks = [];
     let bookmarking = false;
     let bookmarkingIfNotRunning = false;
@@ -123,13 +128,13 @@ export class AdsScheduler {
           }
           break;
         case AdsOp.IF_IS_RUNNING:
-          // Starts a bookmarking region (first guard after a tag).
+          bookmarkingIfNotRunning = false;
           break;
         default:
           if (!ADS_OPCODES.has(op)) {
-            // :TAG marker — begin bookmarking the chunks that follow it.
-            bookmarking = true;
-            bookmarkingIfNotRunning = true;
+            // :TAG marker — enable bookmarking only for the entry tag's region.
+            bookmarking = op === entryTag;
+            bookmarkingIfNotRunning = op === entryTag;
           }
       }
     }
@@ -254,6 +259,7 @@ export class AdsScheduler {
     // slot 0 scenes enter at ip 0; others at the tag (adsAddScene).
     const thread = new TtmThread(slot.manifest, slot.sheets, this.renderer, layer, slotNo === 0 ? undefined : tag);
     thread.sceneRootTag = tag;
+    thread.purgeEnds = true; // ADS scenes end on PURGE so the script can chain
     thread.setOrigin(dx, dy);
 
     // arg3: negative = duration timer (unsupported here → run once);

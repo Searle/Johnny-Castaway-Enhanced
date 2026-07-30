@@ -136,6 +136,28 @@ changelog — only things that will save time or prevent repeating mistakes.
   needs the story calendar (`story.go`) AND redrawing the island at the chosen
   xPos, not the baked ISLETEMP.
 
+## ADS scheduling — two gotchas that cause runaway/endless scenes
+
+- **PURGE ends an ADS scene; it loops a standalone one.** A TTM tag that ends in
+  PURGE (with no sceneTimer) means "scene done" → `isRunning=2`, and the ADS
+  fires the next scene's triggered chunk. If a port instead makes PURGE loop
+  back to the previous tag (fine for viewing ONE scene), an ADS-driven scene
+  loops forever and the script never advances — "one animation repeats endlessly".
+- **Triggered chunks (IF_LASTPLAYED bookmarks) MUST be scoped to the played
+  entry tag.** `adsLoad` enables bookmarking only inside the requested tag's
+  region — every OTHER `:TAG` marker turns it back off. Bookmarking across the
+  whole file lets a completed scene match chunks belonging to unrelated entry
+  sequences (different tags, even different TTM slots), spawning an exponential
+  pile of concurrent scenes. Correctly scoped, the count stays ~1-2.
+- OR-chained `IF_LASTPLAYED` guards share ONE body (a following RANDOM block):
+  bookmark each guarded (slot,tag) pointing at the same body, so any of them
+  completing fires that body. This is the intended self-sustaining idle loop —
+  bounded to one live scene because each completion replaces the previous.
+- A standalone script (e.g. FISHING.ADS) legitimately terminates at its own
+  `FADE_OUT`/`END`; in the real screensaver JOHNNY.ADS (the top-level loop)
+  would then start a new random activity. Not ported here, so a script ending
+  is expected, not a bug.
+
 ## Data quirks / dead references
 
 - **`FIRE.TTM` is an orphaned/prototype script — do not try to render it.** It
