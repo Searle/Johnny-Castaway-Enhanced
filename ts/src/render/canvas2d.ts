@@ -131,6 +131,14 @@ export class Canvas2DRenderer implements Renderer {
   readonly height = H;
 
   private readonly out: CanvasRenderingContext2D;
+  // Offscreen back buffer: the whole frame is composed here, then blitted to the
+  // visible canvas in ONE drawImage. A single blit presents atomically, so the
+  // viewer never catches an intermediate state (black-fill → bg → layers) — that
+  // per-operation exposure is a classic single-buffer canvas tear/blink on some
+  // GPUs. (My software-rendered test capture couldn't reproduce it; this is the
+  // defensive fix.)
+  private readonly buf: OffscreenCanvas;
+  private readonly bufCtx: OffscreenCanvasRenderingContext2D;
   private background: ImageBitmap | null = null;
   private layers: Canvas2DLayer[] = [];
   // Persistent "saved zones" layer (grSavedZonesLayer): scenery baked by
@@ -143,6 +151,12 @@ export class Canvas2DRenderer implements Renderer {
     if (!ctx) throw new Error("2d context unavailable");
     this.out = ctx;
     this.out.imageSmoothingEnabled = false;
+
+    this.buf = new OffscreenCanvas(W, H);
+    const bctx = this.buf.getContext("2d");
+    if (!bctx) throw new Error("offscreen 2d context unavailable");
+    this.bufCtx = bctx;
+    this.bufCtx.imageSmoothingEnabled = false;
   }
 
   setBackground(img: ImageBitmap | null): void {
@@ -175,22 +189,25 @@ export class Canvas2DRenderer implements Renderer {
   }
 
   present(): void {
-    // Black fill first: backgrounds are often shorter than 480 (ISLETEMP.SCR is
-    // 640x350) and must be drawn 1:1, top-left aligned — NOT stretched to fill.
-    // grLoadScreen does exactly this (ClearBackground black, then DrawTexture at
-    // y=0 at native size). Stretching decouples scene sprites, drawn at their
-    // unscaled coords, from the baked shoreline — which put Johnny "on water".
-    this.out.fillStyle = "#000";
-    this.out.fillRect(0, 0, this.width, this.height);
+    const b = this.bufCtx;
+    // Compose into the back buffer. Black fill first: backgrounds are often
+    // shorter than 480 (ISLETEMP.SCR is 640x350) and must be drawn 1:1, top-left
+    // aligned — NOT stretched to fill (grLoadScreen: ClearBackground black then
+    // DrawTexture at y=0 native size; stretching decoupled sprites from the
+    // baked shoreline and put Johnny "on water").
+    b.fillStyle = "#000";
+    b.fillRect(0, 0, this.width, this.height);
     if (this.background) {
-      this.out.drawImage(this.background, 0, 0);
+      b.drawImage(this.background, 0, 0);
     }
     // Saved zones sit above the background, below the active thread layers.
     if (this.savedZones) {
-      this.out.drawImage(this.savedZones.canvas, 0, 0);
+      b.drawImage(this.savedZones.canvas, 0, 0);
     }
     for (const layer of this.layers) {
-      this.out.drawImage(layer.canvas, 0, 0);
+      b.drawImage(layer.canvas, 0, 0);
     }
+    // Single atomic blit to the visible canvas.
+    this.out.drawImage(this.buf, 0, 0);
   }
 }

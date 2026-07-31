@@ -160,6 +160,12 @@ changelog — only things that will save time or prevent repeating mistakes.
   fires the next scene's triggered chunk. If a port instead makes PURGE loop
   back to the previous tag (fine for viewing ONE scene), an ADS-driven scene
   loops forever and the script never advances — "one animation repeats endlessly".
+- **PURGE does NOT stop the current frame — it finishes to the next UPDATE.** In
+  ttmPlay, PURGE only sets isRunning=2 / a goto; `continueLoop` stays true, so
+  DRAW opcodes AFTER the PURGE (up to UPDATE) still render (e.g. MJFIRE tag 142's
+  trailing smoke puff). A port that ends the scene the instant it sees PURGE
+  drops that last frame → a visible blink / lost final pose at scene changes.
+  Fix: set a pending-done/goto flag on PURGE and apply it at the frame's UPDATE.
 - **Triggered chunks (IF_LASTPLAYED bookmarks) MUST be scoped to the played
   entry tag.** `adsLoad` enables bookmarking only inside the requested tag's
   region — every OTHER `:TAG` marker turns it back off. Bookmarking across the

@@ -29,6 +29,9 @@ export class TtmThread {
   private startTagId?: number;
 
   private ip = 0; // index into ops
+  // PURGE sets these, applied at the next UPDATE so the current frame finishes.
+  private pendingDone = false;
+  private pendingGoto = -1;
   private delayVal = 6; // ticks to wait after the current frame
   private timerVal = 0; // ticks remaining before the next frame runs
   private nextGoto = -1; // pending jump target (op index), or -1
@@ -134,6 +137,8 @@ export class TtmThread {
     this.done = false;
     this.timerVal = 0;
     this.nextGoto = -1;
+    this.pendingDone = false;
+    this.pendingGoto = -1;
     if (this.startTagId != null) {
       const t = this.findTag(this.startTagId);
       this.ip = t >= 0 ? t : 0;
@@ -222,14 +227,26 @@ export class TtmThread {
     return true;
   }
 
-  // runFrame executes opcodes until UPDATE (ttmPlay's loop body).
+  // runFrame executes opcodes until UPDATE (ttmPlay's loop body). A PURGE seen
+  // during the frame sets pendingDone/pendingGoto, applied here once the frame
+  // completes — so opcodes after the PURGE (up to UPDATE) still run.
   private runFrame(): void {
     for (;;) {
       if (this.ip >= this.ops.length) {
         this.done = true;
         return;
       }
-      if (this.execOne()) return; // hit UPDATE — frame complete
+      if (this.execOne()) {
+        // Frame complete (UPDATE). Apply any pending PURGE result.
+        if (this.pendingDone) {
+          this.done = true;
+          this.pendingDone = false;
+        } else if (this.pendingGoto >= 0) {
+          this.nextGoto = this.pendingGoto;
+          this.pendingGoto = -1;
+        }
+        return;
+      }
     }
   }
 
@@ -368,19 +385,23 @@ export class TtmThread {
           break;
 
         case Op.PURGE:
-          // PURGE marks the end of a scene segment (ttm.go: with no sceneTimer,
-          // isRunning=2 → scene ends). Two contexts:
-          //  - Under the ADS scheduler (purgeEnds=true): the scene ends so the
-          //    script can chain to the next one via triggered chunks. Without
-          //    this, a scene whose tag ends in PURGE (e.g. MJFISH tag 18) loops
-          //    forever and the ADS never advances.
+          // PURGE marks the end of a scene segment. Crucially it does NOT stop
+          // execution mid-frame — in ttm.go it only sets isRunning=2 / a goto,
+          // and ttmPlay keeps running to the next UPDATE, so any DRAW after the
+          // PURGE (e.g. MJFIRE tag 142's trailing smoke puff) still renders. We
+          // mark the intent and let runFrame finish the current frame first;
+          // dropping the rest of the frame here caused a visible blink and a
+          // lost final pose at scene changes. Two contexts:
+          //  - ADS scheduler (purgeEnds=true): end the scene after this frame so
+          //    the script chains to the next via triggered chunks. (Without
+          //    ending, a PURGE-terminated tag like MJFISH 18 loops forever.)
           //  - Standalone browser (purgeEnds=false): loop back to the scene's
           //    previous tag so a self-contained animation repeats on screen.
           if (this.purgeEnds) {
-            this.done = true;
+            this.pendingDone = true;
           } else {
-            this.nextGoto = this.findPreviousTag(this.ip);
-            if (this.nextGoto < 0) this.done = true;
+            this.pendingGoto = this.findPreviousTag(this.ip);
+            if (this.pendingGoto < 0) this.pendingDone = true;
           }
           break;
 

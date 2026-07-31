@@ -78,6 +78,12 @@ export class AdsScheduler {
     return this.scenes.length;
   }
 
+  // debugScenes reports each running scene's (slot, tag, delay) for the frame
+  // dumper — lets us see the per-frame delay alongside the rendered image.
+  debugScenes(): { slot: number; tag: number; delay: number }[] {
+    return this.scenes.map((s) => ({ slot: s.slot, tag: s.rootTag, delay: s.thread.delay }));
+  }
+
   // start runs the ADS chunk at the given entry tag (adsPlay → adsPlayChunk).
   start(entryTag: number): void {
     this.renderer.resetLayers();

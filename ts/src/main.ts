@@ -179,6 +179,35 @@ async function main() {
   });
   restartBtn.addEventListener("click", reloadCurrent);
 
+  // Frame-dump mode (?dump): expose a stepper that advances the scheduler until
+  // the next DISPLAYED frame and returns the canvas + scene state, so a harness
+  // can save every frame regardless of its delay. Bypasses the rAF loop.
+  if (params.has("dump")) {
+    (window as unknown as { __dumpStep: () => unknown }).__dumpStep = () => {
+      // Advance ticks until one produces a new displayed frame (or the script
+      // stops). This captures each frame once, ignoring wall-clock delay.
+      let guard = 100000;
+      while (guard-- > 0) {
+        const changed = thread ? thread.tick() : scheduler ? scheduler.tick() : false;
+        if (changed) {
+          renderer.present();
+          frames++;
+          const stopped = thread ? thread.isDone : scheduler ? scheduler.isStopped : true;
+          return {
+            frame: frames,
+            stopped,
+            scenes: scheduler ? scheduler.debugScenes() : [],
+            png: canvas.toDataURL("image/png"),
+          };
+        }
+        const dead = thread ? thread.isDone : scheduler ? scheduler.isStopped : true;
+        if (dead) return { frame: frames, stopped: true, scenes: [], png: canvas.toDataURL("image/png") };
+      }
+      return { frame: frames, stopped: true, scenes: [], png: canvas.toDataURL("image/png") };
+    };
+    return; // no rAF loop in dump mode
+  }
+
   // Shared render loop.
   let acc = 0;
   let last = performance.now();
