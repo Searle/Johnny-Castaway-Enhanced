@@ -18,3 +18,4 @@ wasmtest/
 
 # oracle-diff trace output
 go-trace.txt
+go-trace-*.txt

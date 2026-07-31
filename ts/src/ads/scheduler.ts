@@ -347,8 +347,12 @@ export class AdsScheduler {
       const s = this.threads[i];
       if (s === null || s.done) continue;
       if (s.thread.timer <= 0) {
+        // Match ads.go order: set timer from the delay set by the PREVIOUS frame,
+        // THEN run this frame (which sets the delay for the next). Setting it
+        // from the post-run delay instead phase-shifted concurrent scenes by a
+        // frame.
+        s.thread.timer = Math.max(1, s.thread.delay);
         s.thread.runOneFrame();
-        s.thread.timer = Math.max(1, s.thread.delay); // hold for `delay` ticks
         changed = true;
         if (s.thread.isDone) this.onSceneComplete(s);
       } else {
