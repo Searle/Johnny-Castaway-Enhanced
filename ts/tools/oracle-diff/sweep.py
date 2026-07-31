@@ -29,18 +29,22 @@ def norm(text):
 
 
 def go_trace(ads, tag, frames):
-    p = os.path.join(REPO, "go-trace.txt")
+    p = os.path.join(REPO, f"go-trace-{ads}-{tag}-{os.getpid()}.txt")
     if os.path.exists(p):
         os.remove(p)
+    env = {**os.environ, "GO_TRACE_OUT": p}
     try:
         subprocess.run([GO_BIN, "-trace", ads, str(tag), str(frames)],
-                       cwd=REPO, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=45)
+                       cwd=REPO, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=45, env=env)
     except subprocess.TimeoutExpired:
         return None
     if not os.path.exists(p):
         return None
-    with open(p) as f:
-        return f.read()
+    try:
+        with open(p) as f:
+            return f.read()
+    finally:
+        os.remove(p)
 
 
 def main():

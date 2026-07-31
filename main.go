@@ -454,7 +454,14 @@ func main() {
 			if i+3 < len(os.Args) {
 				fmt.Sscanf(os.Args[i+3], "%d", &traceMaxFrame)
 			}
-			traceInit("go-trace.txt")
+			// Output path is $GO_TRACE_OUT or go-trace.txt. A unique path per
+			// invocation avoids concurrent -trace runs clobbering each other's
+			// file (which produced spurious oracle diffs).
+			tracePath := os.Getenv("GO_TRACE_OUT")
+			if tracePath == "" {
+				tracePath = "go-trace.txt"
+			}
+			traceInit(tracePath)
 		} else if strings.HasPrefix(argLower, "/t") || strings.HasPrefix(argLower, "-t") {
 			isTest = true
 			if i+1 < len(os.Args) {

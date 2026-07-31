@@ -35,15 +35,22 @@ def norm(text: str) -> list[str]:
 
 
 def go_trace(ads: str, tag: int, frames: int) -> str:
-    trace_path = os.path.join(REPO, "go-trace.txt")
+    # Unique output file per invocation via GO_TRACE_OUT, so concurrent runs
+    # don't clobber each other's trace (which caused spurious diffs).
+    trace_path = os.path.join(REPO, f"go-trace-{ads}-{tag}-{os.getpid()}.txt")
     if os.path.exists(trace_path):
         os.remove(trace_path)
+    env = {**os.environ, "GO_TRACE_OUT": trace_path}
     subprocess.run(
         [GO_BIN, "-trace", ads, str(tag), str(frames)],
-        cwd=REPO, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60,
+        cwd=REPO, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60, env=env,
     )
-    with open(trace_path) as f:
-        return f.read()
+    try:
+        with open(trace_path) as f:
+            return f.read()
+    finally:
+        if os.path.exists(trace_path):
+            os.remove(trace_path)
 
 
 def ts_trace(ads: str, tag: int, frames: int) -> str:

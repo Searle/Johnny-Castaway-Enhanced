@@ -19,6 +19,12 @@ interface SceneThread {
   done: boolean;
 }
 
+// Go runs up to MaxTTMThreads concurrent scene threads in a FIXED array, always
+// iterated slot 0→N, with adsAddScene reusing the lowest free slot. Matching
+// that slot allocation + iteration order is required for the frame-emission and
+// compositing order to agree with the engine (e.g. WALKSTUF's boat vs Johnny).
+const MAX_THREADS = 10;
+
 // A weighted choice inside a RANDOM_START…END block.
 interface RandOp {
   type: "add" | "stop" | "nop";
@@ -52,7 +58,8 @@ export class AdsScheduler {
   private readonly rng: () => number;
   private readonly position: PositionFn;
 
-  private scenes: SceneThread[] = [];
+  // Fixed slot array (Go's ttmThreads[MaxTTMThreads]); null = free slot.
+  private threads: (SceneThread | null)[] = new Array(MAX_THREADS).fill(null);
   private chunks: Chunk[] = [];
   private lastPlayed: { slot: number; tag: number } | null = null;
   private stopped = false;
@@ -70,24 +77,29 @@ export class AdsScheduler {
     this.position = opts.position ?? (() => ({ dx: 0, dy: 0 }));
   }
 
+  // live returns the running scenes in slot order (skipping free slots).
+  private live(): SceneThread[] {
+    return this.threads.filter((s): s is SceneThread => s !== null);
+  }
+
   get isStopped(): boolean {
-    return this.stopped && this.scenes.length === 0;
+    return this.stopped && this.live().length === 0;
   }
 
   get runningCount(): number {
-    return this.scenes.length;
+    return this.live().length;
   }
 
   // debugScenes reports each running scene's (slot, tag, delay) for the frame
   // dumper — lets us see the per-frame delay alongside the rendered image.
   debugScenes(): { slot: number; tag: number; delay: number }[] {
-    return this.scenes.map((s) => ({ slot: s.slot, tag: s.rootTag, delay: s.thread.delay }));
+    return this.live().map((s) => ({ slot: s.slot, tag: s.rootTag, delay: s.thread.delay }));
   }
 
   // start runs the ADS chunk at the given entry tag (adsPlay → adsPlayChunk).
   start(entryTag: number): void {
     this.renderer.resetLayers();
-    this.scenes = [];
+    this.threads = new Array(MAX_THREADS).fill(null);
     this.stopped = false;
     this.registerChunks(entryTag);
     const ip = this.findTag(entryTag);
@@ -251,7 +263,15 @@ export class AdsScheduler {
   }
 
   private isRunning(slot: number, tag: number): boolean {
-    return this.scenes.some((s) => s.slot === slot && s.rootTag === tag && !s.done);
+    return this.threads.some((s) => s !== null && s.slot === slot && s.rootTag === tag && !s.done);
+  }
+
+  // rebuildLayers re-creates the compositor layers in slot order and rebinds
+  // each live thread to its layer, so compositing (and the frame-emission order
+  // in tick) follows slot index — matching Go's fixed-array iteration.
+  private rebuildLayers(): void {
+    this.renderer.resetLayers();
+    for (const s of this.live()) s.thread.rebindLayer(this.renderer.newLayer());
   }
 
   // addScene spawns a TtmThread for (slot, tag) on a fresh layer (adsAddScene).
@@ -262,10 +282,17 @@ export class AdsScheduler {
       console.warn(`ADS references TTM slot ${slotNo} with no loaded TTM`);
       return;
     }
+    // Lowest free slot (adsAddScene: `for ttmThreads[i].isRunning != 0 { i++ }`).
+    const idx = this.threads.findIndex((s) => s === null);
+    if (idx < 0) {
+      console.warn("ADS: no free thread slot");
+      return;
+    }
     if (traceSink) traceSink(`SCENE slot=${slotNo} tag=${tag}`);
-    const layer = this.renderer.newLayer();
     const { dx, dy } = this.position(slotNo, tag);
-    // slot 0 scenes enter at ip 0; others at the tag (adsAddScene).
+    // slot 0 scenes enter at ip 0; others at the tag (adsAddScene). The layer is
+    // (re)assigned by rebuildLayers so it sits in slot order.
+    const layer = this.renderer.newLayer();
     const thread = new TtmThread(slot.manifest, slot.sheets, this.renderer, layer, slotNo === 0 ? undefined : tag);
     thread.sceneRootTag = tag;
     thread.purgeEnds = true; // ADS scenes end on PURGE so the script can chain
@@ -274,17 +301,20 @@ export class AdsScheduler {
     // arg3: negative = duration timer (unsupported here → run once);
     // positive = iteration count (replay arg3-1 more times).
     const iterations = arg3 > 0 && arg3 < 0x8000 ? arg3 - 1 : 0;
-    this.scenes.push({ slot: slotNo, rootTag: tag, thread, iterations, done: false });
+    this.threads[idx] = { slot: slotNo, rootTag: tag, thread, iterations, done: false };
+    this.rebuildLayers(); // keep compositing order = slot order
   }
 
   private stopScene(slotNo: number, tag: number): void {
-    this.scenes = this.scenes.filter((s) => !(s.slot === slotNo && s.rootTag === tag));
-    this.renderer.resetLayers();
-    // Rebuild remaining layers in order (compositing order preserved).
-    for (const s of this.scenes) {
-      const layer = this.renderer.newLayer();
-      s.thread.rebindLayer(layer);
+    let removed = false;
+    for (let i = 0; i < this.threads.length; i++) {
+      const s = this.threads[i];
+      if (s && s.slot === slotNo && s.rootTag === tag) {
+        this.threads[i] = null;
+        removed = true;
+      }
     }
+    if (removed) this.rebuildLayers();
   }
 
   // tick advances the clock by ONE engine time-unit (~20ms; see TICK_MS in
@@ -299,11 +329,13 @@ export class AdsScheduler {
   // delay into a single tick, so everything ran at a flat frame-per-tick and
   // the whole script played far too fast.
   tick(): boolean {
-    if (this.scenes.length === 0) return false;
+    if (this.live().length === 0) return false;
     let changed = false;
 
-    for (const s of this.scenes) {
-      if (s.done) continue;
+    // Run ready threads in slot order (Go iterates ttmThreads[0..N]).
+    for (let i = 0; i < this.threads.length; i++) {
+      const s = this.threads[i];
+      if (s === null || s.done) continue;
       if (s.thread.timer <= 0) {
         s.thread.runOneFrame();
         s.thread.timer = Math.max(1, s.thread.delay); // hold for `delay` ticks
@@ -314,12 +346,18 @@ export class AdsScheduler {
       }
     }
 
-    // Reap completed scenes; fire their triggered chunks.
-    const completed = this.scenes.filter((s) => s.done);
-    this.scenes = this.scenes.filter((s) => !s.done);
+    // Reap completed scenes (null their slot), then fire triggered chunks in
+    // slot order — the chunk may addScene into a now-free lower slot.
+    const completed: SceneThread[] = [];
+    for (let i = 0; i < this.threads.length; i++) {
+      const s = this.threads[i];
+      if (s && s.done) {
+        completed.push(s);
+        this.threads[i] = null;
+      }
+    }
     if (completed.length > 0) {
-      this.renderer.resetLayers();
-      for (const s of this.scenes) s.thread.rebindLayer(this.renderer.newLayer());
+      this.rebuildLayers();
       for (const c of completed) this.fireTriggeredChunks(c.slot, c.rootTag);
       changed = true;
     }
