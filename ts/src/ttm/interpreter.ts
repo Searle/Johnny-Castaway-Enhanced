@@ -134,6 +134,12 @@ export class TtmThread {
     return this.done;
   }
 
+  // markDone ends the scene from outside the opcode loop — the scheduler calls
+  // it when a duration timer drains (ads.go sets isRunning = 2 there).
+  markDone(): void {
+    this.done = true;
+  }
+
   get tagIds(): number[] {
     return this.tags.map((t) => t.id);
   }
@@ -157,10 +163,25 @@ export class TtmThread {
   // STOP_SCENE / IF_IS_RUNNING checks.
   sceneRootTag = 0;
 
-  // When true, PURGE ends the scene (isDone) instead of looping to the previous
-  // tag. The ADS scheduler sets this so scene chaining works; the standalone
-  // browser leaves it false so single scenes loop for viewing.
-  purgeEnds = false;
+  // sceneTimer is the ADS duration timer (ADD_SCENE arg3 < 0 → -arg3). It is
+  // what decides PURGE's meaning in ttm.go:
+  //
+  //   if sceneTimer != 0 { nextGotoOffset = ttmFindPreviousTag(...) }  // loop
+  //   else               { isRunning = 2 }                             // end
+  //
+  // i.e. a *timed* scene treats PURGE as "segment done, loop back and keep
+  // playing" and only ends when the scheduler drains the timer (ads.go:795-800);
+  // an untimed scene ends on the first PURGE. The scheduler owns the countdown.
+  //
+  // (This replaces an earlier static `purgeEnds` boolean, which collapsed the
+  // rule into "ADS always ends / browser always loops". That made every timed
+  // PURGE-looping scene die on its first PURGE — e.g. MARY.ADS tag 2 stopped
+  // after 1 frame where the engine plays 90 lines by looping tag 104 → 17.)
+  sceneTimer = 0;
+
+  // Standalone browser mode: no ADS scheduler is driving a timer, so loop on
+  // PURGE forever to keep single scenes playing for viewing.
+  loopForever = false;
 
   // setOrigin sets this thread's grDx/grDy (story positioning).
   setOrigin(dx: number, dy: number): void {
@@ -467,16 +488,17 @@ export class TtmThread {
           // mark the intent and let runFrame finish the current frame first;
           // dropping the rest of the frame here caused a visible blink and a
           // lost final pose at scene changes. Two contexts:
-          //  - ADS scheduler (purgeEnds=true): end the scene after this frame so
-          //    the script chains to the next via triggered chunks. (Without
-          //    ending, a PURGE-terminated tag like MJFISH 18 loops forever.)
-          //  - Standalone browser (purgeEnds=false): loop back to the scene's
-          //    previous tag so a self-contained animation repeats on screen.
-          if (this.purgeEnds) {
-            this.pendingDone = true;
-          } else {
+          //  - sceneTimer != 0 (a timed ADS scene) or standalone browser: loop
+          //    back to the scene's previous tag and keep playing. The scheduler
+          //    ends it when the duration timer drains (ads.go:795-800).
+          //  - sceneTimer == 0: end the scene after this frame so the script
+          //    chains to the next via triggered chunks. (Without ending, a
+          //    PURGE-terminated tag like MJFISH 18 would loop forever.)
+          if (this.sceneTimer !== 0 || this.loopForever) {
             this.pendingGoto = this.findPreviousTag(this.ip);
             if (this.pendingGoto < 0) this.pendingDone = true;
+          } else {
+            this.pendingDone = true;
           }
           break;
 

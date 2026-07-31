@@ -272,8 +272,13 @@ export class AdsScheduler {
     // nop: do nothing
   }
 
+  // Mirrors isSceneRunning (ads.go): a thread counts as running while its slot
+  // is occupied — INCLUDING one that has ended but not yet been reaped
+  // (isRunning == 2). Excluding those (an earlier `&& !s.finished`) made
+  // IF_NOT_RUNNING / IF_IS_RUNNING disagree with the engine, which skipped or
+  // ran the wrong ADS branches.
   private isRunning(slot: number, tag: number): boolean {
-    return this.threads.some((s) => s !== null && s.slot === slot && s.rootTag === tag && !s.finished);
+    return this.threads.some((s) => s !== null && s.slot === slot && s.rootTag === tag);
   }
 
   // rebuildLayers re-creates the compositor layers in slot order and rebinds
@@ -305,12 +310,16 @@ export class AdsScheduler {
     const layer = this.renderer.newLayer();
     const thread = new TtmThread(slot.manifest, slot.sheets, this.renderer, layer, slotNo === 0 ? undefined : tag);
     thread.sceneRootTag = tag;
-    thread.purgeEnds = true; // ADS scenes end on PURGE so the script can chain
     thread.setOrigin(dx, dy);
 
-    // arg3: negative = duration timer (unsupported here → run once);
-    // positive = iteration count (replay arg3-1 more times).
-    const iterations = arg3 > 0 && arg3 < 0x8000 ? arg3 - 1 : 0;
+    // arg3 (ads.go:310-314), read as a SIGNED 16-bit value:
+    //   < 0 → sceneTimer = -arg3 : play for that many time units, PURGE looping
+    //         back to the previous tag until the timer drains (see tick()).
+    //   > 0 → sceneIterations = arg3-1 : replay the scene that many more times.
+    //   = 0 → neither: the scene ends on its first PURGE.
+    const signed = arg3 >= 0x8000 ? arg3 - 0x10000 : arg3;
+    const iterations = signed > 0 ? signed - 1 : 0;
+    thread.sceneTimer = signed < 0 ? -signed : 0;
     this.threads[idx] = { slot: slotNo, rootTag: tag, thread, iterations, finished: false };
     this.rebuildLayers(); // keep compositing order = slot order
   }
@@ -342,13 +351,27 @@ export class AdsScheduler {
     if (this.live().length === 0) return false;
     let changed = false;
 
+
     // Run ready threads in slot order (Go iterates ttmThreads[0..N]). A thread
     // that finishes (PURGE/end) is NOT reaped here — like ads.go it keeps its
     // hold timer and is processed only once that timer reaches 0, on a later
     // tick. Reaping immediately shifted concurrent scenes' completion by a frame.
     for (let i = 0; i < this.threads.length; i++) {
       const s = this.threads[i];
-      if (s === null || s.finished) continue;
+      if (s === null) continue;
+      if (s.finished) {
+        // A finished thread must NOT hold its slot for `delay` more ticks.
+        // ads.go re-arms timer = delay, then immediately subtracts `mini` (the
+        // smallest timer across running threads) — so a just-finished thread
+        // lands on timer == 0 and is terminated in the SAME loop iteration,
+        // firing its triggered chunks right away. Counting it down 1-per-tick
+        // instead delayed every chain by `delay` ticks (scenes ran a frame or
+        // two short inside the trace budget), and skipping it entirely parked
+        // the timer forever — the deadlock that stopped MARY.ADS tag 2 after
+        // one frame instead of chaining 104 → 17.
+        s.thread.timer = 0;
+        continue;
+      }
       if (s.thread.timer <= 0) {
         // ads.go order: timer = (previous frame's) delay, THEN run this frame.
         s.thread.timer = Math.max(1, s.thread.delay);
@@ -357,6 +380,22 @@ export class AdsScheduler {
         if (s.thread.isDone) s.finished = true; // mark; process when timer hits 0
       } else {
         s.thread.timer -= 1;
+      }
+    }
+
+    // Drain the ADS duration timer (ads.go:795-800). For each thread whose hold
+    // timer has elapsed, subtract its delay; when the duration runs out the
+    // scene ends — which is what finally stops a timed PURGE-looping scene
+    // (PURGE itself only loops it back while sceneTimer != 0).
+    for (const s of this.live()) {
+      if (s.finished || s.thread.timer > 0) continue;
+      if (s.thread.sceneTimer > 0) {
+        s.thread.sceneTimer -= s.thread.delay;
+        if (s.thread.sceneTimer <= 0) {
+          s.thread.sceneTimer = 0;
+          s.thread.markDone(); // isRunning = 2
+          s.finished = true;
+        }
       }
     }
 

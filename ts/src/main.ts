@@ -49,6 +49,9 @@ async function loadTtmScene(entry: IndexEntry, tag: number) {
     if (token !== loadToken) return;
     const layer = renderer.newLayer();
     thread = new TtmThread(manifest, sheets, renderer, layer, tag);
+    // Standalone scene viewing: no ADS scheduler owns a duration timer, so loop
+    // on PURGE instead of ending, keeping the animation on screen.
+    thread.loopForever = true;
     frames = 0;
     renderer.present();
     (window as unknown as { __ready?: boolean }).__ready = true;
@@ -190,6 +193,8 @@ async function main() {
   // the next DISPLAYED frame and returns the canvas + scene state, so a harness
   // can save every frame regardless of its delay. Bypasses the rAF loop.
   if (params.has("dump")) {
+    // Expose the live scheduler for harness/debug introspection.
+    Object.defineProperty(window, "__sched", { get: () => scheduler });
     (window as unknown as { __dumpStep: () => unknown }).__dumpStep = () => {
       // Advance ticks until one produces a new displayed frame (or the script
       // stops). This captures each frame once, ignoring wall-clock delay.

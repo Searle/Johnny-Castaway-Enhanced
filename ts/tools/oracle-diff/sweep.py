@@ -41,8 +41,13 @@ class GoTraceServer:
     """
 
     def __init__(self):
+        # -window: decorated, resizable window so the oracle is watchable while
+        # the sweep runs (set ORACLE_WINDOW=0 to run in the plain window).
+        cmd = [GO_BIN, "-traceserver"]
+        if os.environ.get("ORACLE_WINDOW", "1") != "0":
+            cmd.append("-window")
         self.proc = subprocess.Popen(
-            [GO_BIN, "-traceserver"], cwd=REPO,
+            cmd, cwd=REPO,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             text=True, bufsize=1,
         )
