@@ -437,6 +437,24 @@ func main() {
 			isPreview = true
 		} else if strings.HasPrefix(argLower, "/s") || strings.HasPrefix(argLower, "-s") {
 			isRun = true
+		} else if argLower == "-trace" || argLower == "/trace" {
+			// -trace <ADS> <tag> [maxFrames]: run the scene like -t, but emit a
+			// canonical draw-call trace to go-trace.txt (see trace.go) and exit
+			// after maxFrames (default 120). Serves as the oracle for the ts/
+			// port. Checked BEFORE -t since "-trace" also has the "-t" prefix.
+			isTest = true
+			traceEnabled = true
+			traceMaxFrame = 120
+			if i+1 < len(os.Args) {
+				testAdsName = os.Args[i+1]
+			}
+			if i+2 < len(os.Args) {
+				fmt.Sscanf(os.Args[i+2], "%d", &testTagNo)
+			}
+			if i+3 < len(os.Args) {
+				fmt.Sscanf(os.Args[i+3], "%d", &traceMaxFrame)
+			}
+			traceInit("go-trace.txt")
 		} else if strings.HasPrefix(argLower, "/t") || strings.HasPrefix(argLower, "-t") {
 			isTest = true
 			if i+1 < len(os.Args) {
@@ -615,7 +633,7 @@ func runStory() {
 					args = append(args, "-k")
 				}
 				cmd := exec.Command(os.Args[0], args...)
-				
+
 				pipe, err := cmd.StdinPipe()
 				if err == nil {
 					stdinPipes[i] = pipe
@@ -817,6 +835,10 @@ func runTestMode(testAdsName string, testTagNo int) {
 		fmt.Printf("Running custom test mode for scene: %s tag %d (LEFT_ISLAND=%v, xPos=%d)\n", testAdsName, testTagNo, islandState.xPos == -272, islandState.xPos)
 		for !shouldExitApp {
 			adsPlay(testAdsName, uint16(testTagNo))
+			if traceReachedBudget {
+				traceClose()
+				os.Exit(0) // -trace: done emitting frames
+			}
 		}
 	} else {
 		for !shouldExitApp {

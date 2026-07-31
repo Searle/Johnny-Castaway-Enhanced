@@ -7,3 +7,6 @@ public/anim/
 
 # compiled Go binary from `go build` / `go run` in the tool dir
 tools/tsextract/tsextract
+
+# oracle-diff trace output
+ts-trace.txt

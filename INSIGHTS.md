@@ -104,6 +104,26 @@ changelog — only things that will save time or prevent repeating mistakes.
   `RESOURCE.001` = `8bb6c99e9129806b5089a39d24228a36`. `RESOURCE.001` on the
   disk itself is a 35-byte stub; the real data is only in `RESOURCE.00$`.
 
+## Oracle diff: compare the TS port against the Go engine (no more guessing)
+
+- The Go engine can emit a **canonical draw-call trace** with `-trace <ADS> <tag>
+  [maxFrames]` → writes `go-trace.txt` (one line per DRAW/CLEAR/DELAY/GOTO/PURGE,
+  frame-delimited). It runs on the WSLg display (DISPLAY=:0; Mesa llvmpipe — do
+  NOT use xvfb-run, which forces DISPLAY=:99 and segfaults). The `-trace` arg
+  MUST be checked before `-t` in main.go's parser (both share the `-t` prefix).
+  Requires rebuilding the repo binary: `go build -o JohnnyCastaway2026 .`
+- The TS port emits the SAME format: load `?dump=1`, then `window.__trace(n)`
+  returns n frames of trace text (setTraceSink in ts/src/ttm/interpreter.ts).
+- **`ts/tools/oracle-diff/diff.py <ADS> <tag> [frames]`** runs both and diffs
+  them (needs a vite server on :5199 + the built Go binary). BUILDING tag 5 is
+  byte-identical for 30 frames — the interpreter/renderer are faithful.
+- Caveat: it normalizes away FRAME numbers + SCENE lines, and only compares the
+  overlapping frame window. Cross-scene RANDOM selection and TIMER delays use
+  RNG (Go math/rand vs JS Math.random) so they diverge — to diff a chain you'd
+  need to seed both RNGs. Single deterministic scenes match exactly; that's
+  where interpreter/render bugs live. (MARY tag 1 diverges on *which* scene
+  plays — a real positioning/story difference, not RNG noise; see below.)
+
 ## Backdrops (SCR) are top-aligned at native size, never stretched
 
 - Scene backdrops are **not all 640×480**. `ISLETEMP.SCR` (the island backdrop

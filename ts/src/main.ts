@@ -1,6 +1,6 @@
 import { loadIndex, loadAnimation, type AnimIndex, type IndexEntry, type AdsIndexEntry } from "./manifest";
 import { Canvas2DRenderer } from "./render/canvas2d";
-import { TtmThread } from "./ttm/interpreter";
+import { TtmThread, setTraceSink } from "./ttm/interpreter";
 import { AdsScheduler, loadAds } from "./ads/scheduler";
 import { positionForScene } from "./ads/positioning";
 
@@ -204,6 +204,25 @@ async function main() {
         if (dead) return { frame: frames, stopped: true, scenes: [], png: canvas.toDataURL("image/png") };
       }
       return { frame: frames, stopped: true, scenes: [], png: canvas.toDataURL("image/png") };
+    };
+
+    // __trace(n): run n displayed frames capturing the canonical draw-call trace
+    // (same format as the Go engine's -trace) and return it as text, for the
+    // oracle diff. Deterministic: steps by displayed frame, not wall clock.
+    (window as unknown as { __trace: (n: number) => string }).__trace = (n: number) => {
+      const lines: string[] = [];
+      setTraceSink((l) => lines.push(l));
+      TtmThread.traceFrameNo = 0;
+      let produced = 0;
+      let guard = 1_000_000;
+      while (produced < n && guard-- > 0) {
+        const changed = thread ? thread.tick() : scheduler ? scheduler.tick() : false;
+        if (changed) produced++;
+        const dead = thread ? thread.isDone : scheduler ? scheduler.isStopped : true;
+        if (dead) break;
+      }
+      setTraceSink(null);
+      return lines.join("\n");
     };
     return; // no rAF loop in dump mode
   }

@@ -15,3 +15,6 @@ tools/*
 .vscode
 Raylib-Go-Wasm/
 wasmtest/
+
+# oracle-diff trace output
+go-trace.txt

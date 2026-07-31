@@ -1,5 +1,5 @@
 import { AdsOp, ADS_OPCODES } from "./opcodes";
-import { TtmThread } from "../ttm/interpreter";
+import { TtmThread, traceSink } from "../ttm/interpreter";
 import { loadAdsFile, loadAnimation, type AdsFile, type Op, type Manifest, type LoadedSheet } from "../manifest";
 import type { Renderer } from "../render/renderer";
 
@@ -260,6 +260,7 @@ export class AdsScheduler {
       console.warn(`ADS references TTM slot ${slotNo} with no loaded TTM`);
       return;
     }
+    if (traceSink) traceSink(`SCENE slot=${slotNo} tag=${tag}`);
     const layer = this.renderer.newLayer();
     const { dx, dy } = this.position(slotNo, tag);
     // slot 0 scenes enter at ip 0; others at the tag (adsAddScene).

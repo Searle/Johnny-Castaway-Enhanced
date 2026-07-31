@@ -201,6 +201,8 @@ func ttmPlay(ttmThread *TTtmThread) {
 	offset = ttmThread.ip
 	data := ttmSlot.data
 
+	traceFrameStart()
+
 	for continueLoop {
 		opCode = peekUint16(data, &offset)
 		numArgs := uint8(opCode) & 0x000f
@@ -239,6 +241,7 @@ func ttmPlay(ttmThread *TTtmThread) {
 			grRestoreBmpSlot(ttmSlot, uint16(ttmThread.selectedBmpSlot))
 		case 0x0110:
 			debugPrintln("\tPURGE")
+			traceOp("PURGE")
 			if ttmThread.sceneTimer != 0 {
 				ttmThread.nextGotoOffset = ttmFindPreviousTag(ttmSlot, offset)
 			} else {
@@ -246,6 +249,9 @@ func ttmPlay(ttmThread *TTtmThread) {
 			}
 		case 0x0FF0:
 			debugPrintln("\tUPDATE")
+			if traceFrameEnd() {
+				traceReachedBudget = true
+			}
 			continueLoop = false
 		case 0x1021:
 			var result uint16
@@ -257,6 +263,7 @@ func ttmPlay(ttmThread *TTtmThread) {
 			ttmThread.timer = result
 			ttmThread.delay = result
 
+			traceOp("DELAY %d", result)
 			debugPrintf("\tSET DELAY => %d\n", result)
 		case 0x1051:
 			debugPrintf("\tSET BMP SLOT: slot:%d\n", args[0])
@@ -278,6 +285,7 @@ func ttmPlay(ttmThread *TTtmThread) {
 		case 0x1201:
 			// ex TTM_UNKNOWN_2
 			debugPrintf("\tGOTO_TAG %d\n", args[0])
+			traceOp("GOTO %d", args[0])
 			ttmThread.nextGotoOffset = ttmFindTag(ttmSlot, args[0])
 		case 0x2002:
 			debugPrintf("\tSET_COLORS %d %d\n", args[0], args[1])
@@ -303,6 +311,7 @@ func ttmPlay(ttmThread *TTtmThread) {
 			}
 			ttmThread.delay = val
 			ttmThread.timer = val
+			traceOp("DELAY %d", val)
 		case 0x4004:
 			resName := "?"
 			if ttmThread.ttmSlot != nil {
@@ -363,16 +372,19 @@ func ttmPlay(ttmThread *TTtmThread) {
 			grDrawCircle(ttmThread.ttmLayer, int16(args[0]), int16(args[1]), args[2], args[3], ttmThread.fgColor, ttmThread.bgColor)
 		case 0xA504:
 			debugPrintf("\tDRAW_SPRITE x:%d y:%d sprtNo:%d imgNo:%d\n", args[0], args[1], args[2], args[3])
+			traceDraw(int16(args[0]), int16(args[1]), args[2], args[3], false)
 			trackThreadMovement(ttmThread, int16(args[0]), int16(args[1]))
 			trackLastDraw(ttmThread, int16(args[0]), int16(args[1]), args[2], args[3], false)
 			grDrawSprite(ttmThread.ttmLayer, ttmThread.ttmSlot, int16(args[0]), int16(args[1]), args[2], args[3])
 		case 0xA524:
 			debugPrintf("\tDRAW_SPRITE_FLIP x:%d y:%d sprtNo:%d imgNo:%d\n", args[0], args[1], args[2], args[3])
+			traceDraw(int16(args[0]), int16(args[1]), args[2], args[3], true)
 			trackThreadMovement(ttmThread, int16(args[0]), int16(args[1]))
 			trackLastDraw(ttmThread, int16(args[0]), int16(args[1]), args[2], args[3], true)
 			grDrawSpriteFlip(ttmThread.ttmLayer, ttmThread.ttmSlot, int16(args[0]), int16(args[1]), args[2], args[3])
 		case 0xA601:
 			debugPrintf("\tCLEAR SCREEN\n")
+			traceOp("CLEAR")
 			grClearScreen(ttmThread.ttmLayer)
 		case 0xB606:
 			debugPrintf("\tDRAW SCREEN: (NOT IMPLEMENTED)\n")
@@ -397,4 +409,3 @@ func ttmPlay(ttmThread *TTtmThread) {
 
 	ttmThread.ip = offset
 }
-

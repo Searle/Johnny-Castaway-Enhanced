@@ -323,6 +323,8 @@ func adsAddScene(ttmSlotNo, ttmTag, arg3 uint16) {
 	ttmThread.settledX = 0
 	ttmThread.settledY = 0
 	numThreads++
+
+	traceScene(ttmSlotNo, ttmTag)
 }
 
 func adsStopScene(sceneNo int, keepAsDecoration bool) {
@@ -732,6 +734,9 @@ func adsPlay(adsName string, adsTag uint16) {
 		grUpdateDisplay(&ttmBackgroundThread, ttmThreads[:], &ttmHolidayThread, &ttmCloudsThread)
 		if shouldExitApp {
 			return
+		}
+		if traceReachedBudget {
+			return // -trace: emitted the requested number of frames
 		}
 
 		// Determine min timer through all threads

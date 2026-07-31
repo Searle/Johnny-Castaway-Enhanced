@@ -2,6 +2,18 @@ import { Op } from "./opcodes";
 import type { Manifest, Op as RawOp, LoadedSheet } from "../manifest";
 import type { Layer, Renderer } from "../render/renderer";
 
+// Optional draw-call trace sink. When set, TtmThread emits canonical trace lines
+// (identical format to the Go engine's -trace: "DRAW s=.. img=.. @x,y flip=..",
+// "DELAY n", "CLEAR", "PURGE", "GOTO n", "FRAME n", "ENDFRAME") so the two can be
+// diffed. Off by default (zero cost); the ?dump harness turns it on.
+export let traceSink: ((line: string) => void) | null = null;
+export function setTraceSink(fn: ((line: string) => void) | null): void {
+  traceSink = fn;
+}
+function trace(line: string): void {
+  if (traceSink) traceSink(line);
+}
+
 // A parsed tag: a jump target the GOTO_TAG / PURGE opcodes reference.
 interface Tag {
   id: number;
@@ -231,6 +243,7 @@ export class TtmThread {
   // during the frame sets pendingDone/pendingGoto, applied here once the frame
   // completes — so opcodes after the PURGE (up to UPDATE) still run.
   private runFrame(): void {
+    if (!this.suppressDraw) trace(`FRAME ${TtmThread.traceFrameNo++}`);
     for (;;) {
       if (this.ip >= this.ops.length) {
         this.done = true;
@@ -238,6 +251,7 @@ export class TtmThread {
       }
       if (this.execOne()) {
         // Frame complete (UPDATE). Apply any pending PURGE result.
+        if (!this.suppressDraw) trace("  ENDFRAME");
         if (this.pendingDone) {
           this.done = true;
           this.pendingDone = false;
@@ -249,6 +263,10 @@ export class TtmThread {
       }
     }
   }
+
+  // Global displayed-frame counter for the trace (matches the Go -trace numbering
+  // across all scenes in a run). Reset by the harness between runs.
+  static traceFrameNo = 0;
 
   // execOne executes a single opcode, advancing ip. Returns true if it was
   // UPDATE (end of frame). Shared by runFrame and the prologue.
@@ -268,6 +286,7 @@ export class TtmThread {
           const v = a[0] > 4 ? a[0] : 4;
           this.delayVal = v;
           this.timerVal = v;
+          if (!this.suppressDraw) trace(`  DELAY ${v}`);
           break;
         }
         case Op.TIMER: {
@@ -276,6 +295,7 @@ export class TtmThread {
             hi = a[1];
           this.delayVal = hi > lo ? lo + Math.floor(Math.random() * (hi - lo + 1)) : lo;
           this.timerVal = this.delayVal;
+          if (!this.suppressDraw) trace(`  DELAY ${this.delayVal}`);
           break;
         }
 
@@ -300,7 +320,10 @@ export class TtmThread {
         }
 
         case Op.CLEAR_SCREEN:
-          if (!this.suppressDraw) this.layer.clear();
+          if (!this.suppressDraw) {
+            trace("  CLEAR");
+            this.layer.clear();
+          }
           break;
 
         case Op.DRAW_SPRITE:
@@ -308,10 +331,12 @@ export class TtmThread {
           if (this.suppressDraw) break;
           // args: x, y, spriteNo, imageNo
           const [x, y, spriteNo, imageNo] = a;
+          const flip = raw.op === Op.DRAW_SPRITE_FLIP;
+          trace(`  DRAW s=${spriteNo} img=${imageNo} @${s16(x)},${s16(y)} flip=${flip ? 1 : 0}`);
           const sheet = this.bmpSlots[imageNo];
           const frame = sheet?.frames[spriteNo];
           if (frame) {
-            this.layer.drawSprite(frame, s16(x), s16(y), raw.op === Op.DRAW_SPRITE_FLIP);
+            this.layer.drawSprite(frame, s16(x), s16(y), flip);
           }
           break;
         }
@@ -381,10 +406,12 @@ export class TtmThread {
           break;
 
         case Op.GOTO_TAG:
+          if (!this.suppressDraw) trace(`  GOTO ${a[0]}`);
           this.nextGoto = this.findTag(a[0]);
           break;
 
         case Op.PURGE:
+          if (!this.suppressDraw) trace("  PURGE");
           // PURGE marks the end of a scene segment. Crucially it does NOT stop
           // execution mid-frame — in ttm.go it only sets isRunning=2 / a goto,
           // and ttmPlay keeps running to the next UPDATE, so any DRAW after the
