@@ -34,6 +34,10 @@ export interface Layer {
   // The ADS/story layer sets it to position a scene on the island (the offset
   // SMDATE and other positioned scenes need); 0 for plain scenes.
   setOrigin(dx: number, dy: number): void;
+
+  // The layer's current origin (grDx, grDy), so the compositor can translate a
+  // COPY_ZONE_TO_BG rect into the layer's pixel space.
+  readonly origin: { dx: number; dy: number };
 }
 
 export interface Renderer {
@@ -50,6 +54,16 @@ export interface Renderer {
   // Remove every layer (e.g. when switching scenes/scripts).
   resetLayers(): void;
 
-  // Composite background + all layers (in creation order) onto the canvas.
+  // COPY_ZONE_TO_BG: bake a rectangle of `from`'s rendered pixels into the
+  // persistent "saved zones" layer (grCopyZoneToBg → grSavedZonesLayer), which
+  // composites above the background but below active thread layers — so scenery
+  // a scene builds (sandcastle, passing tanker) stays after the thread ends.
+  // (x, y, w, h) are in the scene's virtual space; the layer's origin is added.
+  bakeZone(from: Layer, x: number, y: number, w: number, h: number): void;
+
+  // Clear the persistent saved-zones layer (RESTORE_ZONE / new script).
+  clearSavedZones(): void;
+
+  // Composite background + saved zones + all layers (in order) onto the canvas.
   present(): void;
 }

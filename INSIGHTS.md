@@ -136,6 +136,23 @@ changelog — only things that will save time or prevent repeating mistakes.
   needs the story calendar (`story.go`) AND redrawing the island at the chosen
   xPos, not the baked ISLETEMP.
 
+## Persistent scenery — the saved-zones layer (COPY_ZONE_TO_BG)
+
+- Some scenes build scenery that must OUTLIVE the thread that drew it (SMDATE's
+  dinner table + chairs, MJSAND's sandcastle, GJVIS6's passing tanker hull).
+  `COPY_ZONE_TO_BG(x,y,w,h)` bakes that rect into a persistent `grSavedZonesLayer`
+  that composites ABOVE the background but BELOW the active per-thread layers
+  (order: background → clouds → savedZones → threads → holiday). Without it,
+  such scenery vanishes the moment the scene's CLEAR_SCREEN wipes its layer.
+- `SAVE_IMAGE1`, `SAVE_ZONE` are genuine no-ops (unimplemented in the original C
+  too — graphics.go says so). `RESTORE_ZONE` just frees the whole saved layer.
+  `CLEAR_IMGSLOT` (grRestoreBmpSlot) restores a BMP slot to its base (first-
+  loaded) sheet — track a per-slot base to implement it.
+- The Go engine's grCopyZoneToBg tries to redraw the last sprite/rect instead of
+  copying rendered pixels (to avoid a render-texture readback artifact); a
+  Canvas2D port can just copy layer→layer directly (no readback issue). It uses
+  width+2 to paper over a 2px authoring gap in GJVIS6's hull data.
+
 ## ADS scheduling — two gotchas that cause runaway/endless scenes
 
 - **PURGE ends an ADS scene; it loops a standalone one.** A TTM tag that ends in

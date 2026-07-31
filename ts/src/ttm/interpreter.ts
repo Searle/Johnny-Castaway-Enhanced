@@ -37,6 +37,8 @@ export class TtmThread {
   // Per-thread engine state set by opcodes.
   private selectedBmpSlot = 0;
   private bmpSlots: (LoadedSheet | null)[] = new Array(6).fill(null);
+  // Base (first-loaded) sheet per slot — CLEAR_IMGSLOT restores to this.
+  private baseBmpSlots: (LoadedSheet | null)[] = new Array(6).fill(null);
   private readonly palette: string[];
   private fgColor = 0; // SET_COLORS args — palette indices for primitives
   private bgColor = 0;
@@ -272,6 +274,11 @@ export class TtmThread {
         case Op.LOAD_IMAGE: {
           const sheet = this.sheets.get((raw.str ?? "").toUpperCase()) ?? null;
           this.bmpSlots[this.selectedBmpSlot] = sheet;
+          // Record the first sheet loaded into a slot as its base (for
+          // CLEAR_IMGSLOT restore), matching grLoadBmp's baseBmpNames.
+          if (this.baseBmpSlots[this.selectedBmpSlot] == null) {
+            this.baseBmpSlots[this.selectedBmpSlot] = sheet;
+          }
           break;
         }
 
@@ -334,6 +341,28 @@ export class TtmThread {
           break;
         }
 
+        case Op.COPY_ZONE_TO_BG:
+          // args: x, y, w, h — bake this rect of the current scene into the
+          // persistent saved-zones layer so it stays after the scene ends
+          // (grCopyZoneToBg). Skipped during fast-forward (no rendered pixels).
+          if (!this.suppressDraw) {
+            this.renderer.bakeZone(this.layer, s16(a[0]), s16(a[1]), a[2], a[3]);
+          }
+          break;
+
+        case Op.CLEAR_IMGSLOT:
+          // Restore the selected BMP slot to its base (first-loaded) sheet if a
+          // different one is loaded now (grRestoreBmpSlot). Lets a scene that
+          // temporarily swapped a slot's image get the original back.
+          this.restoreBmpSlot(this.selectedBmpSlot);
+          break;
+
+        case Op.RESTORE_ZONE:
+          // Clears the whole saved-zones layer (grRestoreZone →
+          // grReleaseSavedLayer). Only GJGULIVR.TTM uses it.
+          if (!this.suppressDraw) this.renderer.clearSavedZones();
+          break;
+
         case Op.GOTO_TAG:
           this.nextGoto = this.findTag(a[0]);
           break;
@@ -355,14 +384,23 @@ export class TtmThread {
           }
           break;
 
-        // Still no-op (decoded for alignment, low impact in the slice):
-        // SET_PALETTE_SLOT, SET_FRAME1, CLEAR_IMGSLOT, SAVE_IMAGE1/ZONE,
-        // COPY_ZONE_TO_BG, DRAW_SCREEN, PLAY_SAMPLE, LOAD_PALETTE, tag markers.
+        // Still no-op: SET_PALETTE_SLOT, SET_FRAME1, DRAW_SCREEN, PLAY_SAMPLE,
+        // LOAD_PALETTE, tag markers, and SAVE_IMAGE1/SAVE_ZONE (both genuine
+        // no-ops in the original C too — see graphics.go grSaveImage1/grSaveZone).
         default:
           break;
       }
     }
     return false; // non-UPDATE opcode: frame continues
+  }
+
+  // restoreBmpSlot resets a slot to its base sheet if a different one is loaded
+  // now (grRestoreBmpSlot: only acts when slot != base).
+  private restoreBmpSlot(slot: number): void {
+    const base = this.baseBmpSlots[slot];
+    if (base != null && this.bmpSlots[slot] !== base) {
+      this.bmpSlots[slot] = base;
+    }
   }
 
   // color resolves a TTM palette index (masked to 0..15) to a CSS color.

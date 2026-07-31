@@ -25,8 +25,18 @@ class Canvas2DLayer implements Layer {
     this.dy = dy;
   }
 
+  get origin(): { dx: number; dy: number } {
+    return { dx: this.dx, dy: this.dy };
+  }
+
   clear(): void {
     this.ctx.clearRect(0, 0, W, H);
+  }
+
+  // blitFrom copies a rect of `src` into this layer at the same coordinates
+  // (used to bake a zone into the persistent saved-zones layer). No origin/clip.
+  blitFrom(src: OffscreenCanvas, x: number, y: number, w: number, h: number): void {
+    this.ctx.drawImage(src, x, y, w, h, x, y, w, h);
   }
 
   setClip(x: number, y: number, w: number, h: number): void {
@@ -123,6 +133,10 @@ export class Canvas2DRenderer implements Renderer {
   private readonly out: CanvasRenderingContext2D;
   private background: ImageBitmap | null = null;
   private layers: Canvas2DLayer[] = [];
+  // Persistent "saved zones" layer (grSavedZonesLayer): scenery baked by
+  // COPY_ZONE_TO_BG, composited above the background but below active layers.
+  // Created lazily on first bake.
+  private savedZones: Canvas2DLayer | null = null;
 
   constructor(canvas: HTMLCanvasElement) {
     const ctx = canvas.getContext("2d");
@@ -143,6 +157,21 @@ export class Canvas2DRenderer implements Renderer {
 
   resetLayers(): void {
     this.layers = [];
+    this.savedZones = null;
+  }
+
+  bakeZone(from: Layer, x: number, y: number, w: number, h: number): void {
+    if (!this.savedZones) this.savedZones = new Canvas2DLayer();
+    // The source pixels live at (x+dx, y+dy) in the layer's canvas; copy that
+    // same rect to the same place on the saved-zones layer. +2 width matches
+    // grCopyZoneToBg's rounding fudge for a 2px hull gap in the original data.
+    const { dx, dy } = from.origin;
+    const src = (from as Canvas2DLayer).canvas;
+    this.savedZones.blitFrom(src, x + dx, y + dy, w + 2, h);
+  }
+
+  clearSavedZones(): void {
+    this.savedZones = null;
   }
 
   present(): void {
@@ -155,6 +184,10 @@ export class Canvas2DRenderer implements Renderer {
     this.out.fillRect(0, 0, this.width, this.height);
     if (this.background) {
       this.out.drawImage(this.background, 0, 0);
+    }
+    // Saved zones sit above the background, below the active thread layers.
+    if (this.savedZones) {
+      this.out.drawImage(this.savedZones.canvas, 0, 0);
     }
     for (const layer of this.layers) {
       this.out.drawImage(layer.canvas, 0, 0);
