@@ -16,7 +16,7 @@ interface SceneThread {
   rootTag: number;
   thread: TtmThread;
   iterations: number; // remaining replays (ADD_SCENE arg3 > 0), 0 = once
-  done: boolean;
+  finished: boolean; // ran its last frame; awaiting hold-timer to be reaped
 }
 
 // Go runs up to MaxTTMThreads concurrent scene threads in a FIXED array, always
@@ -273,7 +273,7 @@ export class AdsScheduler {
   }
 
   private isRunning(slot: number, tag: number): boolean {
-    return this.threads.some((s) => s !== null && s.slot === slot && s.rootTag === tag && !s.done);
+    return this.threads.some((s) => s !== null && s.slot === slot && s.rootTag === tag && !s.finished);
   }
 
   // rebuildLayers re-creates the compositor layers in slot order and rebinds
@@ -311,7 +311,7 @@ export class AdsScheduler {
     // arg3: negative = duration timer (unsupported here → run once);
     // positive = iteration count (replay arg3-1 more times).
     const iterations = arg3 > 0 && arg3 < 0x8000 ? arg3 - 1 : 0;
-    this.threads[idx] = { slot: slotNo, rootTag: tag, thread, iterations, done: false };
+    this.threads[idx] = { slot: slotNo, rootTag: tag, thread, iterations, finished: false };
     this.rebuildLayers(); // keep compositing order = slot order
   }
 
@@ -342,52 +342,50 @@ export class AdsScheduler {
     if (this.live().length === 0) return false;
     let changed = false;
 
-    // Run ready threads in slot order (Go iterates ttmThreads[0..N]).
+    // Run ready threads in slot order (Go iterates ttmThreads[0..N]). A thread
+    // that finishes (PURGE/end) is NOT reaped here — like ads.go it keeps its
+    // hold timer and is processed only once that timer reaches 0, on a later
+    // tick. Reaping immediately shifted concurrent scenes' completion by a frame.
     for (let i = 0; i < this.threads.length; i++) {
       const s = this.threads[i];
-      if (s === null || s.done) continue;
+      if (s === null || s.finished) continue;
       if (s.thread.timer <= 0) {
-        // Match ads.go order: set timer from the delay set by the PREVIOUS frame,
-        // THEN run this frame (which sets the delay for the next). Setting it
-        // from the post-run delay instead phase-shifted concurrent scenes by a
-        // frame.
+        // ads.go order: timer = (previous frame's) delay, THEN run this frame.
         s.thread.timer = Math.max(1, s.thread.delay);
         s.thread.runOneFrame();
         changed = true;
-        if (s.thread.isDone) this.onSceneComplete(s);
+        if (s.thread.isDone) s.finished = true; // mark; process when timer hits 0
       } else {
         s.thread.timer -= 1;
       }
     }
 
-    // Reap completed scenes (null their slot), then fire triggered chunks in
-    // slot order — the chunk may addScene into a now-free lower slot.
-    const completed: SceneThread[] = [];
+    // Process finished threads whose hold timer has now elapsed: iteration
+    // replay, else free the slot + fire triggered chunks. Slot order so a
+    // chunk's ADD_SCENE reuses the lowest freed slot (matching adsAddScene).
+    let membershipChanged = false;
     for (let i = 0; i < this.threads.length; i++) {
       const s = this.threads[i];
-      if (s && s.done) {
-        completed.push(s);
-        this.threads[i] = null;
+      if (!s || !s.finished || s.thread.timer > 0) continue;
+      if (s.iterations > 0) {
+        s.iterations--;
+        s.thread.restart(true); // iteration replay keeps the timer (ads.go)
+        s.finished = false;
+        continue;
       }
+      this.lastPlayed = { slot: s.slot, tag: s.rootTag };
+      this.threads[i] = null;
+      membershipChanged = true;
+      this.fireTriggeredChunks(s.slot, s.rootTag);
     }
-    if (completed.length > 0) {
+    if (membershipChanged) {
       this.rebuildLayers();
-      for (const c of completed) this.fireTriggeredChunks(c.slot, c.rootTag);
       changed = true;
     }
 
     return changed;
   }
 
-  private onSceneComplete(s: SceneThread): void {
-    if (s.iterations > 0) {
-      s.iterations--;
-      s.thread.restart(true); // iteration replay keeps the timer (ads.go)
-      return;
-    }
-    s.done = true;
-    this.lastPlayed = { slot: s.slot, tag: s.rootTag };
-  }
 
   // fireTriggeredChunks replays the ADS chunks guarded on this (slot, tag)
   // scene's completion (adsPlayTriggeredChunks). This is how MARY.ADS advances
