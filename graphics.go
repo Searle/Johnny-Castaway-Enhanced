@@ -1148,7 +1148,10 @@ func grUpdateDisplay(
 			// composed frame to the rAF loop and wait for the next tick instead
 			// of sleeping (the engine runs in a goroutine, see frameloop_js.go).
 			webYieldFrame()
-		} else {
+		} else if !traceEnabled {
+			// -trace: the oracle diff steps by frame count, not wall-clock, so
+			// skip the per-frame pacing sleep entirely. The trace is emitted from
+			// the draw calls above and is unaffected — this only removes idle wait.
 			time.Sleep(time.Millisecond * time.Duration(frameDelayMS))
 		}
 
@@ -1172,7 +1175,7 @@ func grUpdateDisplay(
 		}
 
 		end := rl.GetTime()
-		if isFadingOut || grUpdateDelay == 0 || isMaxSpeed ||
+		if isFadingOut || grUpdateDelay == 0 || isMaxSpeed || traceEnabled ||
 			(end-start) >= (float64(grUpdateDelay)*0.02) {
 			break
 		}
