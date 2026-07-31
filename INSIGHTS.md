@@ -115,20 +115,61 @@ changelog — only things that will save time or prevent repeating mistakes.
 - The TS port emits the SAME format: load `?dump=1`, then `window.__trace(n)`
   returns n frames of trace text (setTraceSink in ts/src/ttm/interpreter.ts).
 - **`ts/tools/oracle-diff/diff.py <ADS> <tag> [frames]`** runs both and diffs
-  them (needs a vite server on :5199 + the built Go binary). BUILDING tag 5 is
-  byte-identical for 30 frames — the interpreter/renderer are faithful.
+  them (needs a vite server on :5199 + the built Go binary).
 - RNG is seeded deterministically in trace mode (two independent mulberry32
   streams — ADS scene-pick and TTM TIMER — mirrored bit-for-bit in Go trace.go
   and TS interpreter.ts), so whole ADS chains diff, not just single scenes.
-  Bugs the oracle caught and fixed: fast-forward running GOTO/PURGE and drawing
-  TIMER randoms it shouldn't; non-slot-order thread iteration; reaping completed
-  scenes a frame early. `sweep.py` covers all 66 ADS entry tags.
-- **Status: 63/66 byte-identical.** The 3 residual (ACTIVITY 8/11, WALKSTUF 1)
-  are a concurrent-scene 1-frame phase shift — when two scenes are ready in the
-  same tick, one emits its frame a tick early (confirmed pure reorder for
-  WALKSTUF: same draws, shifted). Cosmetically invisible; rooted in the exact
-  tick-timer interleave of simultaneously-running scenes, which is intricate to
-  make bit-perfect without risking the 63 that pass. Left as a known residual.
+  `sweep.py` covers all 66 ADS entry tags.
+
+### The harness must fail loudly, or it will lie to you
+
+- **A comparison that truncates to `min(len(go), len(ts))` silently passes any
+  TS trace that stopped early.** That single line inflated the score to a
+  confident-looking "63/66 byte-identical" when the honest number was **10/66**.
+  Worse, it produced a *plausible wrong story*: the few scenes that did fail
+  looked like a harmless "1-frame phase shift", and the shifting failure set
+  across runs got blamed on GPU contention. Both were fabrications of the
+  measurement. **Unequal trace length is a FAILURE, not a prefix match.**
+- The TS side must be polled for readiness (`window.__ready === true`, set once
+  assets are decoded and playback is live), never a blind `sleep`. A fixed sleep
+  racing async asset decode is what made trace lengths vary run-to-run.
+- Lesson worth keeping: when a metric and a symptom disagree, **distrust the
+  metric first**. Re-running the same scene 3× and diffing the divergence-set
+  md5 is the cheap discriminator between a real bug and a flaky harness.
+
+### Speed (sweep: 3m25s → 1m32s)
+
+- `-traceserver` inits raylib ONCE and serves scenes from stdin
+  (`ADS tag frames` → `===TRACE X.ADS N===`…`===END===` on stdout; raylib's own
+  INFO spam interleaves on stdout, so filter by line prefix). Per-scene process
+  launch cost ~2s of GL init × 66.
+- Each scene needs fresh-process state or traces differ: `adsInit()` (zeroes all
+  threads incl. background/clouds/holiday) + `traceResetForScene()` (re-seeds
+  both RNG streams, clears the frame budget). Verified byte-identical to
+  per-process `-trace`, and order-independent.
+- Loop `adsPlay` until the frame budget fills — mirroring runTestMode. Some
+  scenes (STAND.ADS tag 14) end their ADS chunk after one frame but re-enter to
+  keep animating, so a single `adsPlay` returns early.
+- `sweep.py` pipelines Go against Playwright: fire the Go request, run the
+  independent TS trace while Go computes, then read the Go block → per-scene
+  cost becomes ~max(go, ts) instead of go+ts.
+- `traceEnabled` also skips the per-frame pacing sleep in graphics.go (the diff
+  steps by frame count, not wall clock).
+
+### Status: 33/66 byte-identical (deterministic)
+
+Remaining divergence has a narrow signature: the **ADS RANDOM stream goes out of
+phase**. A STOP_SCENE gets dropped from a random block (`inSkip` true where Go
+has it false), so the block's total weight differs (5 vs 6) → `randAds(total)`
+draws against a different modulus → every later pick diverges (STAND:2: TS picks
+36 where Go picks 33). Rooted in reap-vs-chunk-fire timing.
+
+**How to debug this class of bug** (this is what actually cracked the last three):
+`window.__sched` is exposed in `?dump` mode — wrap `addScene`/`stopScene`/
+`pickRandom` to log the decision sequence, then compare against the Go engine's
+own decisions via `debugEnabled = true` (debug.go:10 — flip, build, revert; it
+writes an untracked `debug.log`). Comparing *decision sequences* beats staring at
+draw-call diffs, because it shows which branch each engine took and why.
 
 ## Backdrops (SCR) are top-aligned at native size, never stretched
 
@@ -179,13 +220,33 @@ changelog — only things that will save time or prevent repeating mistakes.
   Canvas2D port can just copy layer→layer directly (no readback issue). It uses
   width+2 to paper over a 2px authoring gap in GJVIS6's hull data.
 
-## ADS scheduling — two gotchas that cause runaway/endless scenes
+## ADS scheduling — gotchas that cause runaway, endless, or dead scenes
 
-- **PURGE ends an ADS scene; it loops a standalone one.** A TTM tag that ends in
-  PURGE (with no sceneTimer) means "scene done" → `isRunning=2`, and the ADS
-  fires the next scene's triggered chunk. If a port instead makes PURGE loop
-  back to the previous tag (fine for viewing ONE scene), an ADS-driven scene
-  loops forever and the script never advances — "one animation repeats endlessly".
+- **PURGE's meaning is decided at RUNTIME by `sceneTimer`, not by a mode flag.**
+  ttm.go: `if sceneTimer != 0 { goto previous tag } else { isRunning = 2 }`.
+  `sceneTimer` comes from ADD_SCENE's third arg read as **signed 16-bit**:
+  `arg3 < 0` → `sceneTimer = -arg3` (a *timed* scene: PURGE loops it back and it
+  keeps playing until ads.go drains the timer by `delay` per elapsed hold);
+  `arg3 > 0` → `sceneIterations = arg3-1` (replay that many more times);
+  `arg3 == 0` → ends on first PURGE. **61 scenes across BUILDING/VISITOR/SUZY/
+  JOHNNY/MARY/ACTIVITY use a negative arg3**, so this is load-bearing, not an
+  edge case. A port that collapses this into a static boolean ("ADS always ends
+  / browser always loops") kills every timed PURGE-looping scene on its first
+  PURGE. The standalone viewer needs its own explicit `loopForever` flag instead.
+- **A finished thread must keep counting its hold timer down, or the whole
+  script deadlocks.** A thread marked finished on the same tick it ran its last
+  frame still holds `timer = delay`. If the scheduler skips finished threads
+  when decrementing, that timer never reaches 0, the thread is never reaped, its
+  triggered chunks never fire, and the chain stops dead (MARY.ADS tag 2 emitted
+  4 trace lines vs the engine's 90 — it *looked* like an early-exit bug, but it
+  was a stuck timer). ads.go re-arms `timer = delay` then immediately subtracts
+  `mini`, so a just-finished thread lands on 0 and terminates in the SAME loop
+  iteration — i.e. reap it promptly rather than making it wait `delay` ticks.
+- **`isSceneRunning` counts `isRunning != 0`, which INCLUDES `isRunning == 2`**
+  (ended but not yet reaped). Excluding finished-but-unreaped threads makes
+  `IF_NOT_RUNNING` / `IF_IS_RUNNING` take the wrong branch — and because those
+  guards gate what gets pushed into a RANDOM block, a wrong branch changes the
+  block's total weight and desynchronises the whole RNG stream from that point.
 - **PURGE does NOT stop the current frame — it finishes to the next UPDATE.** In
   ttmPlay, PURGE only sets isRunning=2 / a goto; `continueLoop` stays true, so
   DRAW opcodes AFTER the PURGE (up to UPDATE) still render (e.g. MJFIRE tag 142's
