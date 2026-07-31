@@ -382,7 +382,7 @@ export class AdsScheduler {
   private onSceneComplete(s: SceneThread): void {
     if (s.iterations > 0) {
       s.iterations--;
-      s.thread.restart();
+      s.thread.restart(true); // iteration replay keeps the timer (ads.go)
       return;
     }
     s.done = true;

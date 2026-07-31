@@ -177,11 +177,13 @@ export class TtmThread {
     this.layer.setOrigin(this.originDx, this.originDy);
   }
 
-  // restart re-enters the scene at its start tag for an iteration replay
-  // (ADD_SCENE arg3 > 0). Slot-0 scenes re-enter at ip 0.
-  restart(): void {
+  // restart re-enters the scene at its start tag. `keepTimer` preserves the
+  // current hold timer (ads.go's iteration replay sets ip but does NOT reset the
+  // timer — the replayed scene waits out its remaining hold before the next
+  // frame); the browser's loop restart passes false for an immediate replay.
+  restart(keepTimer = false): void {
     this.done = false;
-    this.timerVal = 0;
+    if (!keepTimer) this.timerVal = 0;
     this.nextGoto = -1;
     this.pendingDone = false;
     this.pendingGoto = -1;
@@ -325,11 +327,16 @@ export class TtmThread {
         }
         case Op.TIMER: {
           // (min,max) range → uniform random delay, matching the Go 0x2022.
+          // Skip during fast-forward: Go enters a scene by jumping straight to
+          // the tag offset (ttmFindTag), so it never executes — nor draws a
+          // random for — TIMER opcodes before the entry tag. Consuming randTimer
+          // here would desync the TIMER RNG stream vs the oracle.
+          if (this.suppressDraw) break;
           const lo = a[0],
             hi = a[1];
           this.delayVal = hi > lo ? lo + randTimer(hi - lo + 1) : lo;
           this.timerVal = this.delayVal;
-          if (!this.suppressDraw) trace(`  DELAY ${this.delayVal}`);
+          trace(`  DELAY ${this.delayVal}`);
           break;
         }
 
