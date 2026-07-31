@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -426,6 +428,7 @@ func main() {
 	var isPreview = false
 	var isTest = false
 	var isBench = false
+	var isTraceServer = false
 	var testAdsName = ""
 	var testTagNo = 0
 
@@ -437,6 +440,14 @@ func main() {
 			isPreview = true
 		} else if strings.HasPrefix(argLower, "/s") || strings.HasPrefix(argLower, "-s") {
 			isRun = true
+		} else if argLower == "-traceserver" || argLower == "/traceserver" {
+			// -traceserver: pay raylib/GL init ONCE, then read "ADS tag frames"
+			// lines from stdin and emit a delimited trace block per scene. Lets
+			// the oracle sweep amortize the ~2s per-process startup across all 66
+			// scenes instead of relaunching. Checked before -trace / -t (shared
+			// prefix). traceEnabled skips the wall-clock pacing (see graphics.go).
+			isTraceServer = true
+			traceEnabled = true
 		} else if argLower == "-trace" || argLower == "/trace" {
 			// -trace <ADS> <tag> [maxFrames]: run the scene like -t, but emit a
 			// canonical draw-call trace to go-trace.txt (see trace.go) and exit
@@ -511,11 +522,15 @@ func main() {
 		runBenchMode()
 		os.Exit(0)
 	}
+	if isTraceServer {
+		runTraceServer()
+		os.Exit(0)
+	}
 	if isTest {
 		runTestMode(testAdsName, testTagNo)
 		os.Exit(0)
 	}
-	if isRun || (!isSettings && !isPreview && !isBench && !isTest) {
+	if isRun || (!isSettings && !isPreview && !isBench && !isTest && !isTraceServer) {
 		isScreensaverMode = true
 	}
 	runApp()
@@ -767,33 +782,27 @@ func runBenchMode() {
 	}
 }
 
-func runTestMode(testAdsName string, testTagNo int) {
-	setupApp()
-	defer rl.CloseWindow()
-	defer rl.CloseAudioDevice()
-	defer graphicsEnd()
-	defer unloadSfx()
-
-	adsInit()
+// setupSceneForTrace mirrors the story-day / raft / tide / island positioning
+// that storyPlay() would apply for a given (ADS, tag), so test and trace runs
+// match real playback. Returns the normalized ADS name ("X.ADS"). Extracted
+// from runTestMode so -traceserver can re-apply it per scene.
+func setupSceneForTrace(adsName string, tagNo int) string {
 	storyCurrentDay = activeConfig.CurrentDay
 	islandState.xPos = 0
 	islandState.yPos = 0
 	islandState.lowTide = 0
 	islandState.raft = 0
 
-	// Find the scene in storyScenes so test mode can mirror its actual story-day,
-	// raft stage, tide eligibility, and island positioning instead of using a
-	// generic hardcoded island setup.
 	var scene TStoryScene
 	found := false
-	if testAdsName != "" && testTagNo > 0 {
-		testAdsName = strings.ToUpper(testAdsName)
-		if !strings.HasSuffix(testAdsName, ".ADS") {
-			testAdsName += ".ADS"
+	if adsName != "" && tagNo > 0 {
+		adsName = strings.ToUpper(adsName)
+		if !strings.HasSuffix(adsName, ".ADS") {
+			adsName += ".ADS"
 		}
 
 		for _, s := range storyScenes {
-			if strings.ToUpper(s.adsName) == testAdsName && int(s.adsTagNo) == testTagNo {
+			if strings.ToUpper(s.adsName) == adsName && int(s.adsTagNo) == tagNo {
 				scene = s
 				found = true
 				break
@@ -837,6 +846,18 @@ func runTestMode(testAdsName string, testTagNo int) {
 	} else {
 		adsNoIsland()
 	}
+	return adsName
+}
+
+func runTestMode(testAdsName string, testTagNo int) {
+	setupApp()
+	defer rl.CloseWindow()
+	defer rl.CloseAudioDevice()
+	defer graphicsEnd()
+	defer unloadSfx()
+
+	adsInit()
+	testAdsName = setupSceneForTrace(testAdsName, testTagNo)
 
 	if testAdsName != "" && testTagNo > 0 {
 		fmt.Printf("Running custom test mode for scene: %s tag %d (LEFT_ISLAND=%v, xPos=%d)\n", testAdsName, testTagNo, islandState.xPos == -272, islandState.xPos)
@@ -857,6 +878,87 @@ func runTestMode(testAdsName string, testTagNo int) {
 			// Play water return (JOHNNY.ADS tag 3)
 			adsPlay("JOHNNY.ADS", 3)
 		}
+	}
+}
+
+// runTraceServer inits raylib once, then serves scene traces on demand: read
+// "ADS tag [frames]" lines from stdin, emit a delimited trace block per line to
+// stdout. Amortizes the ~2s per-process raylib/GL startup across the whole
+// oracle sweep. Each scene is reset to fresh-process state (traceResetForScene
+// re-seeds the RNG) so the output matches the one-process-per-scene baseline
+// bit-for-bit. Protocol per scene:
+//
+//	===TRACE ADS tag===
+//	<canonical trace lines>
+//	===END===
+//
+// Empty/blank input line or EOF ends the server.
+func runTraceServer() {
+	setupApp()
+	defer rl.CloseWindow()
+	defer rl.CloseAudioDevice()
+	defer graphicsEnd()
+	defer unloadSfx()
+
+	adsInit()
+
+	// Startup log lines land on stderr; stdout carries only trace blocks so the
+	// harness can read them cleanly. Signal readiness so the harness can sync.
+	fmt.Fprintln(os.Stderr, "[traceserver] ready")
+
+	scanner := bufio.NewScanner(os.Stdin)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	out := bufio.NewWriter(os.Stdout)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			break
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			fmt.Fprintf(os.Stderr, "[traceserver] bad request: %q\n", line)
+			continue
+		}
+		ads := fields[0]
+		tag := 0
+		frames := 120
+		fmt.Sscanf(fields[1], "%d", &tag)
+		if len(fields) >= 3 {
+			fmt.Sscanf(fields[2], "%d", &frames)
+		}
+
+		// Fresh-process state for this scene, then capture its trace to a buffer.
+		// adsInit() zeroes every thread + the background/clouds/holiday threads
+		// and numThreads — the same clean slate a freshly-launched process gets
+		// (runTestMode calls it once per invocation). Without it, thread state
+		// (e.g. the wave/clouds threads) leaks between scenes.
+		adsInit()
+		traceResetForScene()
+		traceMaxFrame = frames
+		shouldExitApp = false
+		var buf bytes.Buffer
+		traceOut = &buf
+
+		adsName := setupSceneForTrace(ads, tag)
+		// Mirror runTestMode's loop EXACTLY: some scenes (e.g. STAND.ADS tag 14)
+		// end their ADS chunk after one frame but re-enter to keep animating, so
+		// a single adsPlay returns early. Re-run until the frame budget is hit,
+		// matching the one-process-per-scene baseline. Guard against a scene that
+		// emits zero frames per call (would spin forever) by bailing if the trace
+		// stops growing.
+		for !traceReachedBudget && !shouldExitApp {
+			before := buf.Len()
+			adsPlay(adsName, uint16(tag))
+			if buf.Len() == before {
+				break // no progress this pass — scene produced nothing, avoid a spin
+			}
+		}
+
+		traceOut = os.Stdout
+		fmt.Fprintf(out, "===TRACE %s %d===\n", adsName, tag)
+		out.Write(buf.Bytes())
+		fmt.Fprintln(out, "===END===")
+		out.Flush()
 	}
 }
 

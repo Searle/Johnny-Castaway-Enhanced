@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 )
 
@@ -30,7 +31,7 @@ var (
 	traceFrameNo       = 0
 	traceCurTag        = uint16(0)
 	traceReachedBudget = false // set true once maxFrame frames are traced
-	traceOut           = os.Stdout
+	traceOut           io.Writer = os.Stdout
 )
 
 // traceInit opens the trace output file (raylib spams stdout/stderr with INFO
@@ -47,9 +48,23 @@ func traceInit(path string) {
 
 // traceClose flushes and closes the trace file.
 func traceClose() {
-	if traceOut != nil && traceOut != os.Stdout {
-		traceOut.Close()
+	if c, ok := traceOut.(io.Closer); ok && traceOut != os.Stdout {
+		c.Close()
 	}
+}
+
+// traceResetForScene restores the exact state a freshly-launched -trace process
+// would have at the start of a scene: RNG streams re-seeded to their initial
+// values, frame counter and budget flag cleared. The persistent -traceserver
+// mode calls this before every scene so each trace matches the one-process-per-
+// scene baseline bit-for-bit (otherwise scene N would inherit scene N-1's RNG
+// position).
+func traceResetForScene() {
+	traceRngAds = 0x1234abcd
+	traceRngTimer = 0x9e3779b9
+	traceFrameNo = 0
+	traceCurTag = 0
+	traceReachedBudget = false
 }
 
 // Deterministic RNG for trace mode. When traceEnabled, the ADS RANDOM-block

@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Run the oracle diff across EVERY ADS script + entry tag and summarize.
 
-Reuses ONE Playwright browser across all scenes (launching a browser per scene
-was the bottleneck). The Go trace still needs one process launch per scene.
+Reuses ONE Playwright browser AND one persistent Go trace-server across all
+scenes. The old sweep relaunched the Go binary per scene (~2s raylib/GL init
+each = ~130s of pure startup); -traceserver pays that once and serves each
+scene's trace on demand over stdin/stdout.
 
 Usage (from ts/, with a vite server on :5199 and the Go binary built):
     uv run --with playwright python tools/oracle-diff/sweep.py [frames]
@@ -28,25 +30,68 @@ def norm(text):
     return out
 
 
-def go_trace(ads, tag, frames):
-    p = os.path.join(REPO, f"go-trace-{ads}-{tag}-{os.getpid()}.txt")
-    if os.path.exists(p):
-        os.remove(p)
-    env = {**os.environ, "GO_TRACE_OUT": p}
-    # -window: run the oracle in a normal decorated window (nicer to watch than
-    # the borderless screensaver window). Trace mode still exits on frame budget.
-    try:
-        subprocess.run([GO_BIN, "-trace", ads, str(tag), str(frames), "-window"],
-                       cwd=REPO, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=45, env=env)
-    except subprocess.TimeoutExpired:
-        return None
-    if not os.path.exists(p):
-        return None
-    try:
-        with open(p) as f:
-            return f.read()
-    finally:
-        os.remove(p)
+class GoTraceServer:
+    """Persistent `JohnnyCastaway2026 -traceserver` process. Send it "ADS tag
+    frames" lines; read back a "===TRACE ..==="/"===END===" block per scene.
+
+    raylib writes its own INFO/WARNING logs to stdout, interleaved between our
+    blocks, so we filter those out while reading the block body. The trace text
+    written between the delimiters is itself clean (it comes from an in-memory
+    buffer on the Go side), so filtering by line prefix is safe.
+    """
+
+    def __init__(self):
+        self.proc = subprocess.Popen(
+            [GO_BIN, "-traceserver"], cwd=REPO,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, bufsize=1,
+        )
+
+    def send(self, ads, tag, frames):
+        """Queue a scene request without waiting for the result, so the caller
+        can do the (independent) TS-side trace while Go computes. Returns False
+        if the server is gone."""
+        if self.proc.poll() is not None:
+            return False
+        try:
+            self.proc.stdin.write(f"{ads} {tag} {frames}\n")
+            self.proc.stdin.flush()
+            return True
+        except (BrokenPipeError, OSError):
+            return False
+
+    def read(self, ads, tag):
+        """Block until the block for (ads, tag) arrives; return its clean body
+        (or None if the server died). Because requests are answered in order,
+        reading right after send() pairs correctly."""
+        want = f"===TRACE {ads}.ADS {tag}==="
+        started = False
+        body = []
+        for line in self.proc.stdout:
+            line = line.rstrip("\n")
+            if not started:
+                if line == want:
+                    started = True
+                continue
+            if line == "===END===":
+                return "\n".join(body)
+            if line.startswith(("INFO:", "WARNING:")):
+                continue
+            body.append(line)
+        return None  # EOF before END → server died mid-scene
+
+    def trace(self, ads, tag, frames):
+        return self.read(ads, tag) if self.send(ads, tag, frames) else None
+
+    def close(self):
+        try:
+            if self.proc.stdin and not self.proc.stdin.closed:
+                self.proc.stdin.write("\n")  # blank line = quit
+                self.proc.stdin.flush()
+                self.proc.stdin.close()
+            self.proc.wait(timeout=10)
+        except Exception:
+            self.proc.kill()
 
 
 def main():
@@ -57,15 +102,15 @@ def main():
 
     from playwright.sync_api import sync_playwright
     passed, failed, errored = [], [], []
+    go_server = GoTraceServer()
     with sync_playwright() as pw:
         browser = pw.chromium.launch()
         page = browser.new_page(viewport={"width": 700, "height": 560})
         for name, tag in jobs:
-            go = go_trace(name, tag, frames)
-            if go is None:
-                errored.append((name, tag, "go-trace failed/timeout"))
-                print(f"  ERR  {name}.ADS tag {tag}  (go trace failed)")
-                continue
+            # Pipeline: fire the Go request first, then do the (independent) TS
+            # trace while the Go engine computes concurrently, then collect the
+            # Go block. Turns per-scene cost from go+ts into ~max(go, ts).
+            go_ok = go_server.send(name, tag, frames)
             try:
                 page.goto(f"{TS_URL}/?ads={name}.ADS&tag={tag}&dump=1", wait_until="networkidle")
                 page.wait_for_function("() => typeof window.__trace === 'function'", timeout=8000)
@@ -76,8 +121,15 @@ def main():
                 page.wait_for_function("() => window.__ready === true", timeout=8000)
                 ts = page.evaluate(f"() => window.__trace({frames})")
             except Exception as e:
+                if go_ok:
+                    go_server.read(name, tag)  # drain the pending Go block to stay in sync
                 errored.append((name, tag, str(e)[:60]))
                 print(f"  ERR  {name}.ADS tag {tag}  ({str(e)[:50]})")
+                continue
+            go = go_server.read(name, tag) if go_ok else None
+            if go is None:
+                errored.append((name, tag, "go-trace failed/died"))
+                print(f"  ERR  {name}.ADS tag {tag}  (go trace failed)")
                 continue
             g, t = norm(go), norm(ts)
             # Length mismatch is now a FAILURE, not silently truncated to
@@ -98,6 +150,7 @@ def main():
                 failed.append((name, tag, f"{d} lines"))
                 print(f"  DIFF {name}.ADS tag {tag}  ({d} lines differ)")
         browser.close()
+    go_server.close()
 
     print()
     print(f"=== {len(passed)}/{len(jobs)} identical | {len(failed)} diverge | {len(errored)} errored ({frames} frames) ===")
