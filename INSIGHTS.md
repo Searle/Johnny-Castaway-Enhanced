@@ -117,12 +117,18 @@ changelog — only things that will save time or prevent repeating mistakes.
 - **`ts/tools/oracle-diff/diff.py <ADS> <tag> [frames]`** runs both and diffs
   them (needs a vite server on :5199 + the built Go binary). BUILDING tag 5 is
   byte-identical for 30 frames — the interpreter/renderer are faithful.
-- Caveat: it normalizes away FRAME numbers + SCENE lines, and only compares the
-  overlapping frame window. Cross-scene RANDOM selection and TIMER delays use
-  RNG (Go math/rand vs JS Math.random) so they diverge — to diff a chain you'd
-  need to seed both RNGs. Single deterministic scenes match exactly; that's
-  where interpreter/render bugs live. (MARY tag 1 diverges on *which* scene
-  plays — a real positioning/story difference, not RNG noise; see below.)
+- RNG is seeded deterministically in trace mode (two independent mulberry32
+  streams — ADS scene-pick and TTM TIMER — mirrored bit-for-bit in Go trace.go
+  and TS interpreter.ts), so whole ADS chains diff, not just single scenes.
+  Bugs the oracle caught and fixed: fast-forward running GOTO/PURGE and drawing
+  TIMER randoms it shouldn't; non-slot-order thread iteration; reaping completed
+  scenes a frame early. `sweep.py` covers all 66 ADS entry tags.
+- **Status: 63/66 byte-identical.** The 3 residual (ACTIVITY 8/11, WALKSTUF 1)
+  are a concurrent-scene 1-frame phase shift — when two scenes are ready in the
+  same tick, one emits its frame a tick early (confirmed pure reorder for
+  WALKSTUF: same draws, shifted). Cosmetically invisible; rooted in the exact
+  tick-timer interleave of simultaneously-running scenes, which is intricate to
+  make bit-perfect without risking the 63 that pass. Left as a known residual.
 
 ## Backdrops (SCR) are top-aligned at native size, never stretched
 
