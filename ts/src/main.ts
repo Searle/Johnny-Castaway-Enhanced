@@ -5,7 +5,7 @@ import { AdsScheduler, loadAds } from "./ads/scheduler";
 import { positionForScene } from "./ads/positioning";
 
 // One TTM "tick" is ~33ms in the original (the ADS loop's per-tick sleep).
-const TICK_MS = 33;
+const TICK_MS = 20; // one engine time-unit = 20ms (grUpdateDisplay: delay * 0.02s)
 const ANIM_ROOT = `${import.meta.env.BASE_URL}anim`;
 
 const $ = (id: string) => document.getElementById(id)!;

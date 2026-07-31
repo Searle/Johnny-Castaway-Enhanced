@@ -278,30 +278,31 @@ export class AdsScheduler {
     }
   }
 
-  // tick advances all running scenes by the ads.go main-loop rule: run a frame
-  // for each scene whose timer hit 0, then subtract the smallest timer from all.
-  // Completed scenes fire their triggered chunks and are removed. Returns true
-  // if anything changed (redraw needed).
+  // tick advances the clock by ONE engine time-unit (~20ms; see TICK_MS in
+  // main.ts) and runs a frame for any scene whose timer reaches 0. A displayed
+  // TTM frame is held for `delay` units before the next runs (ttmPlay sets
+  // delay via SET_DELAY/TIMER; grUpdateDisplay holds it delay*0.02s).
+  //
+  // NOTE: the Go loop subtracts `mini` (the smallest timer) each iteration and
+  // then SLEEPS mini*20ms. Because we're driven by a fixed-rate rAF instead of
+  // sleeping, we must instead count each timer down by 1 per tick — subtracting
+  // the whole `mini` here (as an earlier version did) collapsed every scene's
+  // delay into a single tick, so everything ran at a flat frame-per-tick and
+  // the whole script played far too fast.
   tick(): boolean {
     if (this.scenes.length === 0) return false;
     let changed = false;
 
     for (const s of this.scenes) {
       if (s.done) continue;
-      if (s.thread.timer === 0) {
-        s.thread.timer = s.thread.delay;
+      if (s.thread.timer <= 0) {
         s.thread.runOneFrame();
+        s.thread.timer = Math.max(1, s.thread.delay); // hold for `delay` ticks
         changed = true;
         if (s.thread.isDone) this.onSceneComplete(s);
+      } else {
+        s.thread.timer -= 1;
       }
-    }
-
-    // Advance time: subtract the smallest live timer from all.
-    const live = this.scenes.filter((s) => !s.done);
-    if (live.length > 0) {
-      let mini = Math.min(...live.map((s) => Math.min(s.thread.timer, s.thread.delay)));
-      if (!isFinite(mini) || mini < 0) mini = 0;
-      for (const s of live) s.thread.timer = Math.max(0, s.thread.timer - mini);
     }
 
     // Reap completed scenes; fire their triggered chunks.

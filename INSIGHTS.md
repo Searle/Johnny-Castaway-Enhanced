@@ -166,6 +166,15 @@ changelog — only things that will save time or prevent repeating mistakes.
   whole file lets a completed scene match chunks belonging to unrelated entry
   sequences (different tags, even different TTM slots), spawning an exponential
   pile of concurrent scenes. Correctly scoped, the count stays ~1-2.
+- **Timing: one engine tick = 20ms, and a frame is held `delay` ticks.** ttmPlay
+  sets `delay` (SET_DELAY min 4 / TIMER random); grUpdateDisplay holds the frame
+  until `elapsed >= delay*0.02s`. The Go main loop subtracts `mini` (smallest
+  timer) each iteration THEN sleeps `mini*20ms`. A fixed-rate rAF port must NOT
+  copy the subtract-mini step — with no sleep it collapses every scene's delay
+  into one tick, so the whole script plays at a flat frame-per-tick (~30fps),
+  far too fast. Instead count each timer down by 1 per rAF tick and pace rAF at
+  ~20ms. (The single-thread TTM player already did this; only the ADS scheduler
+  had the bug.)
 - OR-chained `IF_LASTPLAYED` guards share ONE body (a following RANDOM block):
   bookmark each guarded (slot,tag) pointing at the same body, so any of them
   completing fires that body. This is the intended self-sustaining idle loop —
