@@ -1,5 +1,5 @@
 import { AdsOp, ADS_OPCODES } from "./opcodes";
-import { TtmThread, traceSink } from "../ttm/interpreter";
+import { TtmThread, traceSink, randInt } from "../ttm/interpreter";
 import { loadAdsFile, loadAnimation, type AdsFile, type Op, type Manifest, type LoadedSheet } from "../manifest";
 import type { Renderer } from "../render/renderer";
 
@@ -233,7 +233,9 @@ export class AdsScheduler {
     if (randOps.length === 0) return;
     const total = randOps.reduce((s, r) => s + r.weight, 0);
     if (total <= 0) return;
-    let a = Math.floor(this.rng() * total);
+    // In trace mode use the deterministic RNG (matches the Go engine's
+    // traceRandN(totalWeight)); otherwise the injected/Math.random rng.
+    let a = traceSink ? randInt(total) : Math.floor(this.rng() * total);
     let chosen = randOps[randOps.length - 1];
     let partial = 0;
     for (const r of randOps) {

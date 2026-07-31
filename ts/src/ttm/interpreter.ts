@@ -9,9 +9,29 @@ import type { Layer, Renderer } from "../render/renderer";
 export let traceSink: ((line: string) => void) | null = null;
 export function setTraceSink(fn: ((line: string) => void) | null): void {
   traceSink = fn;
+  traceRngState = 0x1234abcd; // reset the deterministic RNG when (dis)arming trace
 }
 function trace(line: string): void {
   if (traceSink) traceSink(line);
+}
+
+// Deterministic mulberry32 PRNG, mirroring trace.go's traceRandN with the SAME
+// seed. Used at the RANDOM/TIMER sites ONLY while the trace sink is active, so
+// the oracle diff sees identical random choices in both engines. Outside trace
+// mode, playback uses Math.random as before.
+let traceRngState = 0x1234abcd;
+export function traceRandN(n: number): number {
+  if (n <= 0) return 0;
+  traceRngState = (traceRngState + 0x6d2b79f5) >>> 0;
+  let z = traceRngState;
+  z = Math.imul(z ^ (z >>> 15), z | 1) >>> 0;
+  z = (z ^ (z + (Math.imul(z ^ (z >>> 7), z | 61) >>> 0))) >>> 0;
+  z = (z ^ (z >>> 14)) >>> 0;
+  return z % n;
+}
+// randInt returns a deterministic value in [0,n) under trace, else Math.random.
+export function randInt(n: number): number {
+  return traceSink ? traceRandN(n) : Math.floor(Math.random() * n);
 }
 
 // A parsed tag: a jump target the GOTO_TAG / PURGE opcodes reference.
@@ -293,7 +313,7 @@ export class TtmThread {
           // (min,max) range → uniform random delay, matching the Go 0x2022.
           const lo = a[0],
             hi = a[1];
-          this.delayVal = hi > lo ? lo + Math.floor(Math.random() * (hi - lo + 1)) : lo;
+          this.delayVal = hi > lo ? lo + randInt(hi - lo + 1) : lo;
           this.timerVal = this.delayVal;
           if (!this.suppressDraw) trace(`  DELAY ${this.delayVal}`);
           break;
@@ -406,12 +426,19 @@ export class TtmThread {
           break;
 
         case Op.GOTO_TAG:
-          if (!this.suppressDraw) trace(`  GOTO ${a[0]}`);
+          // Skip control flow during fast-forward: it only replays loads/state
+          // up to the entry tag, and must not follow jumps or (below) end the
+          // scene on a PURGE belonging to an EARLIER tag it scanned past. That
+          // bug made a scene entered at a later tag (e.g. MJFISH tag 18, forwarded
+          // past tag 1's PURGE) complete after one frame.
+          if (this.suppressDraw) break;
+          trace(`  GOTO ${a[0]}`);
           this.nextGoto = this.findTag(a[0]);
           break;
 
         case Op.PURGE:
-          if (!this.suppressDraw) trace("  PURGE");
+          if (this.suppressDraw) break; // see GOTO_TAG: no control flow while forwarding
+          trace("  PURGE");
           // PURGE marks the end of a scene segment. Crucially it does NOT stop
           // execution mid-frame — in ttm.go it only sets isRunning=2 / a goto,
           // and ttmPlay keeps running to the next UPDATE, so any DRAW after the

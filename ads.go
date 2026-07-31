@@ -392,7 +392,12 @@ func adsRandomPickOp() *TAdsRandOp {
 		totalWeight += int(adsRandOps[i].weight)
 	}
 
-	a := rand.Intn(totalWeight)
+	var a int
+	if traceEnabled {
+		a = traceRandN(totalWeight) // deterministic in trace mode (oracle diff)
+	} else {
+		a = rand.Intn(totalWeight)
+	}
 
 	for res = 0; res < adsNumRandOps; res++ {
 		partialWeight += int(adsRandOps[res].weight)

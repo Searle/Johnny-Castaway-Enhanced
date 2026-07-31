@@ -52,6 +52,30 @@ func traceClose() {
 	}
 }
 
+// Deterministic RNG for trace mode. When traceEnabled, the ADS RANDOM-block
+// pick and the TTM TIMER opcode draw from THIS instead of the global math/rand,
+// so a run is reproducible and the TS port (which implements the identical
+// mulberry32 PRNG, same seed) produces the same random choices — making the
+// draw-call traces diffable end-to-end instead of only within a single
+// deterministic scene. Other random consumers (island/clouds/story) keep using
+// the global rand; they don't affect the compared draw calls.
+var traceRngState uint32 = 0x1234abcd // fixed seed shared with the TS port
+
+// traceRandN returns a deterministic pseudo-random int in [0, n) using
+// mulberry32 (a tiny, well-distributed 32-bit PRNG that's trivial to mirror in
+// JS). Falls back to 0 for n <= 0.
+func traceRandN(n int) int {
+	if n <= 0 {
+		return 0
+	}
+	traceRngState += 0x6D2B79F5
+	z := traceRngState
+	z = (z ^ (z >> 15)) * (z | 1)
+	z ^= z + (z^(z>>7))*(z|61)
+	z = z ^ (z >> 14)
+	return int(z % uint32(n))
+}
+
 // traceScene marks entry into a scene (slot, root tag).
 func traceScene(slot, tag uint16) {
 	if !traceEnabled {
