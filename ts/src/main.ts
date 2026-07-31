@@ -199,24 +199,43 @@ async function main() {
     (window as unknown as { __dumpStep: () => unknown }).__dumpStep = () => {
       // Advance ticks until one produces a new displayed frame (or the script
       // stops). This captures each frame once, ignoring wall-clock delay.
-      let guard = 100000;
-      while (guard-- > 0) {
-        const changed = thread ? thread.tick() : scheduler ? scheduler.tick() : false;
-        if (changed) {
+      //
+      // The snapshot is taken from INSIDE the tick, at the scheduler's
+      // grUpdateDisplay point (onPresent) — not after tick() returns. The reap
+      // step at the end of a tick frees a finished scene's layer, so grabbing
+      // the canvas afterwards can miss that scene's final frame entirely
+      // (BUILDING.ADS tag 1: Johnny's last walking sprite).
+      let png: string | null = null;
+      let sceneSnapshot: { slot: number; tag: number; delay: number }[] = [];
+      if (scheduler) {
+        scheduler.onPresent = () => {
           renderer.present();
-          frames++;
-          const stopped = thread ? thread.isDone : scheduler ? scheduler.isStopped : true;
-          return {
-            frame: frames,
-            stopped,
-            scenes: scheduler ? scheduler.debugScenes() : [],
-            png: canvas.toDataURL("image/png"),
-          };
-        }
-        const dead = thread ? thread.isDone : scheduler ? scheduler.isStopped : true;
-        if (dead) return { frame: frames, stopped: true, scenes: [], png: canvas.toDataURL("image/png") };
+          png = canvas.toDataURL("image/png");
+          sceneSnapshot = scheduler!.debugScenes();
+        };
       }
-      return { frame: frames, stopped: true, scenes: [], png: canvas.toDataURL("image/png") };
+      try {
+        let guard = 100000;
+        while (guard-- > 0) {
+          const changed = thread ? thread.tick() : scheduler ? scheduler.tick() : false;
+          if (changed) {
+            if (!scheduler) renderer.present(); // single-TTM mode has no scheduler
+            frames++;
+            const stopped = thread ? thread.isDone : scheduler ? scheduler.isStopped : true;
+            return {
+              frame: frames,
+              stopped,
+              scenes: scheduler ? sceneSnapshot : [],
+              png: png ?? canvas.toDataURL("image/png"),
+            };
+          }
+          const dead = thread ? thread.isDone : scheduler ? scheduler.isStopped : true;
+          if (dead) return { frame: frames, stopped: true, scenes: [], png: canvas.toDataURL("image/png") };
+        }
+        return { frame: frames, stopped: true, scenes: [], png: canvas.toDataURL("image/png") };
+      } finally {
+        if (scheduler) scheduler.onPresent = null;
+      }
     };
 
     // __trace(n): run n displayed frames capturing the canonical draw-call trace
@@ -287,9 +306,26 @@ async function main() {
   // Shared render loop.
   let acc = 0;
   let last = performance.now();
+  let presented = false;
+  // Composite at the scheduler's grUpdateDisplay point (inside tick, before the
+  // reap frees a finished scene's layer) rather than after the tick returns —
+  // otherwise a scene's final frame is lost (BUILDING.ADS tag 1). This also
+  // means each tick in the catch-up loop below presents its own frame instead
+  // of only the last one surviving.
+  const attachPresent = () => {
+    if (scheduler && !scheduler.onPresent) {
+      scheduler.onPresent = () => {
+        renderer.present();
+        presented = true;
+        frames++;
+      };
+    }
+  };
   function loop(now: number) {
     acc += now - last;
     last = now;
+    attachPresent();
+    presented = false;
     let changed = false;
     let budget = 10;
     while (acc >= TICK_MS && budget-- > 0) {
@@ -297,7 +333,7 @@ async function main() {
         acc -= TICK_MS;
         if (thread.tick()) changed = true;
       } else if (scheduler) {
-        if (scheduler.tick()) changed = true;
+        scheduler.tick(); // presents via onPresent
         // One scheduler tick advances the engine clock by `mini` time-units
         // (ads.go then sleeps mini * 20ms), NOT by one. Charge the real cost or
         // playback runs `mini`× too fast — with clouds running, mini is usually
@@ -307,9 +343,11 @@ async function main() {
         acc = 0;
       }
     }
-    if (changed) {
-      renderer.present();
-      frames++;
+    if (changed || presented) {
+      if (changed) {
+        renderer.present(); // single-TTM mode: no scheduler to present for us
+        frames++;
+      }
       if (thread) {
         hud.textContent = `${ttmSelect.value} — tag ${tagSelect.value} — frame ${frames}${thread.isDone ? " (done)" : ""}`;
       } else if (scheduler) {

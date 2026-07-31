@@ -509,6 +509,11 @@ export class AdsScheduler {
     return Math.max(1, this.lastTickUnits);
   }
 
+  // Called at ads.go's grUpdateDisplay point inside tick() — see step 2 there.
+  // The caller composites here rather than after tick() returns, so a scene's
+  // last frame is shown before its layer is freed by the reap.
+  onPresent: (() => void) | null = null;
+
   tick(): boolean {
     if (this.live().length === 0) return false;
     let changed = false;
@@ -538,10 +543,23 @@ export class AdsScheduler {
       }
     }
 
-    // 2. The trace's frame budget stops the run right after the frame is
-    // emitted — ads.go returns from adsPlay on traceReachedBudget, BEFORE the
-    // mini/reap step below. Bail at the same point so the oracle sees the same
-    // final frame and the same trailing state.
+    // 2. DISPLAY. This is ads.go's grUpdateDisplay call site, and its position
+    // matters: it runs AFTER the frame(s) were drawn but BEFORE the reap step
+    // below frees any finished thread's layer. A scene's final frame is drawn,
+    // shown, and only then does its layer go away.
+    //
+    // Presenting after tick() returns instead (i.e. after the reap) loses that
+    // final frame: BUILDING.ADS tag 1 draws Johnny's last walking sprite on
+    // tag 16's layer, PURGEs, and is reaped in the same iteration — so the
+    // viewer saw an empty island where the engine shows him mid-stride. The
+    // draw-call trace is identical either way, which is why the oracle can't
+    // catch this.
+    if (changed) this.onPresent?.();
+
+    // The trace's frame budget stops the run right after the frame is emitted —
+    // ads.go returns from adsPlay on traceReachedBudget, BEFORE the mini/reap
+    // step below. Bail at the same point so the oracle sees the same final
+    // frame and the same trailing state.
     if (TtmThread.traceReachedBudget) return changed;
 
     // 3. mini = min over RUNNING threads (incl. finished-but-unreaped, which are

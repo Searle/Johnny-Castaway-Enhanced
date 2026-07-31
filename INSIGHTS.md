@@ -256,13 +256,24 @@ The trace compares draw *calls*. A frame whose calls are perfect can still be
 composited or presented wrongly, and the sweep will happily report 66/66. A user
 spotting "Johnny is missing on frame 14 of ACTIVITY:12" found exactly that:
 
-- **Don't present between the reap and the next draw.** ads.go calls
-  `grUpdateDisplay` once per main-loop iteration, BEFORE the reap step — so the
-  moment when the old scene has been reaped and the new ones added but nothing
-  has drawn yet is never shown. The TS `tick()` was reporting a membership
-  change as `changed`, so the dump stepper captured that in-between state: both
-  fresh layers empty, the old one freed → a blank frame. Only a frame that
-  actually RAN counts as a display change.
+- **Composite INSIDE the tick, at ads.go's `grUpdateDisplay` call site** — after
+  the frames are drawn, BEFORE the reap frees any finished thread's layer. This
+  is a position, not just a timing detail: a scene's last frame is drawn,
+  displayed, and only then does its layer go away. Presenting after `tick()`
+  returns (i.e. after the reap) silently DROPS every scene's final frame —
+  BUILDING.ADS tag 1 draws Johnny's last walking sprite on tag 16's layer,
+  PURGEs, and is reaped in the same iteration, so the viewer saw an empty island
+  where the engine shows him mid-stride. The scheduler now exposes an
+  `onPresent` hook and the callers (rAF loop, `__dumpStep`) composite there.
+  Bonus fix: the rAF loop runs several ticks per frame when catching up, and
+  presenting once at the end collapsed them into one — `onPresent` gives each
+  tick its own frame (BUILDING:1 went 78 → 93 distinct frames per 12s).
+- **Don't present between the reap and the next draw.** The same
+  `grUpdateDisplay`-before-reap ordering means the moment when the old scene has
+  been reaped and new ones added but nothing has drawn is never shown. The TS
+  `tick()` was reporting a membership change as `changed`, so the dump stepper
+  captured that in-between state: both fresh layers empty, the old one freed → a
+  blank frame. Only a frame that actually RAN counts as a display change.
 - **A thread's layer must outlive an add/stop of some OTHER thread.** In the
   engine each thread's render texture is made once by `grNewLayer` and only its
   own `CLEAR_SCREEN` (or `grFreeLayer` at stop) touches it. A `rebuildLayers`
