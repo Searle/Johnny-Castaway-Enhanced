@@ -98,6 +98,20 @@ func mulberry32(state *uint32, n int) int {
 func traceRandAds(n int) int   { return mulberry32(&traceRngAds, n) }
 func traceRandTimer(n int) int { return mulberry32(&traceRngTimer, n) }
 
+// schedLog: temporary scheduler-decision log for the oracle diff. Goes to
+// stderr (stdout carries the -traceserver protocol) and only when JC_SCHED_LOG
+// is set, so it costs nothing in normal runs. Used to compare the ADS
+// scheduler's DECISION SEQUENCE (add/stop/reap/random pick/conditional branch)
+// against the TS port's, which is far more diagnostic than diffing draw calls.
+var schedLogEnabled = os.Getenv("JC_SCHED_LOG") != ""
+
+func schedLog(format string, a ...any) {
+	if !schedLogEnabled {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "SCHED "+format+"\n", a...)
+}
+
 // traceScene marks entry into a scene (slot, root tag).
 func traceScene(slot, tag uint16) {
 	if !traceEnabled {

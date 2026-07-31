@@ -28,3 +28,19 @@
 export function positionForScene(_adsName: string, _slot: number, _tag: number): { dx: number; dy: number } {
   return { dx: 0, dy: 0 };
 }
+
+// The four scenes in story_data.go WITHOUT the ISLAND flag (all FINAL | FIRST).
+// Every other entry tag either carries ISLAND or has no story entry at all —
+// and main.go's setupSceneForTrace runs adsInitIsland() for both of those cases
+// (`if !found || scene.flags&ISLAND`), so ISLAND is the default and this is the
+// complete exception list.
+//
+// It matters to the scheduler, not the renderer: adsInitIsland starts the
+// background(waves) and clouds threads, whose timers take part in the ads.go
+// main loop's `mini` computation. adsNoIsland stops them. See AdsScheduler's
+// metronome fields.
+const NON_ISLAND_SCENES = new Set(["JOHNNY.ADS:1", "JOHNNY.ADS:6", "SUZY.ADS:1", "SUZY.ADS:2"]);
+
+export function sceneHasIsland(adsName: string, tag: number): boolean {
+  return !NON_ISLAND_SCENES.has(`${adsName.toUpperCase()}:${tag}`);
+}

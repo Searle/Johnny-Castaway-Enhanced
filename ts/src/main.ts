@@ -1,8 +1,8 @@
 import { loadIndex, loadAnimation, type AnimIndex, type IndexEntry, type AdsIndexEntry } from "./manifest";
 import { Canvas2DRenderer } from "./render/canvas2d";
 import { TtmThread, setTraceSink } from "./ttm/interpreter";
-import { AdsScheduler, loadAds } from "./ads/scheduler";
-import { positionForScene } from "./ads/positioning";
+import { AdsScheduler, loadAds, setSchedSink } from "./ads/scheduler";
+import { positionForScene, sceneHasIsland } from "./ads/positioning";
 
 // One TTM "tick" is ~33ms in the original (the ADS loop's per-tick sleep).
 const TICK_MS = 20; // one engine time-unit = 20ms (grUpdateDisplay: delay * 0.02s)
@@ -72,6 +72,7 @@ async function loadAdsScript(entry: AdsIndexEntry, entryTag: number) {
     if (token !== loadToken) return;
     scheduler = new AdsScheduler(ads, slots, renderer, {
       position: (slot, tag) => positionForScene(entry.name, slot, tag),
+      island: sceneHasIsland(entry.name, entryTag),
     });
     scheduler.start(entryTag);
     frames = 0;
@@ -221,23 +222,62 @@ async function main() {
     // __trace(n): run n displayed frames capturing the canonical draw-call trace
     // (same format as the Go engine's -trace) and return it as text, for the
     // oracle diff. Deterministic: steps by displayed frame, not wall clock.
-    (window as unknown as { __trace: (n: number) => string }).__trace = (n: number) => {
-      const lines: string[] = [];
-      setTraceSink((l) => lines.push(l)); // arms the deterministic RNG too
+    // runForFrames drives the engine until it has EMITTED n frames, mirroring the
+    // Go engine's traceMaxFrame / traceReachedBudget (trace.go): the budget is
+    // counted where frames are actually written (TtmThread's ENDFRAME), not by
+    // "ticks that changed the display". Those are different — one scheduler tick
+    // can run TWO threads and emit two frames — so tick-counting overshot and
+    // made otherwise-correct scenes fail on trace length alone.
+    const runForFrames = (n: number) => {
       TtmThread.traceFrameNo = 0;
+      TtmThread.traceMaxFrame = n;
+      TtmThread.traceReachedBudget = false;
       // Re-run from the entry tag with the sink armed, so the ADS RANDOM picks
       // and TIMER draws use the seeded RNG. The initial start() at page load ran
       // before the sink was set (using Math.random) — that made the first trace
       // differ from later ones. (TTM single-scene mode has no ADS RNG to reseed.)
       if (scheduler) scheduler.restart();
-      let produced = 0;
       let guard = 1_000_000;
-      while (produced < n && guard-- > 0) {
-        const changed = thread ? thread.tick() : scheduler ? scheduler.tick() : false;
-        if (changed) produced++;
-        const dead = thread ? thread.isDone : scheduler ? scheduler.isStopped : true;
-        if (dead) break;
+      let framesAtPassStart = 0; // frames emitted before the current adsPlay pass
+      while (!TtmThread.traceReachedBudget && guard-- > 0) {
+        if (thread) {
+          thread.tick();
+          if (thread.isDone) break;
+          continue;
+        }
+        if (!scheduler) break;
+        scheduler.tick();
+        // The script ran dry before the budget was met: re-enter the entry tag,
+        // exactly as runTestMode / -traceserver loop `adsPlay` (some tags end
+        // their chunk after a frame or two but are simply played again). Bail if
+        // a whole pass emits no frames, so a genuinely empty tag can't spin —
+        // the same guard the Go trace server uses (`if buf.Len() == before`).
+        if (scheduler.isDrained) {
+          if (TtmThread.traceFrameNo === framesAtPassStart) break;
+          framesAtPassStart = TtmThread.traceFrameNo;
+          scheduler.restart();
+        }
       }
+      TtmThread.traceMaxFrame = 0;
+    };
+
+    (window as unknown as { __trace: (n: number) => string }).__trace = (n: number) => {
+      const lines: string[] = [];
+      setTraceSink((l) => lines.push(l)); // arms the deterministic RNG too
+      runForFrames(n);
+      setTraceSink(null);
+      return lines.join("\n");
+    };
+
+    // __schedlog(n): same run as __trace, but returns the SCHEDULER DECISION
+    // sequence (add/stop/reap/random-pick/conditional branch) in the Go engine's
+    // JC_SCHED_LOG format, so the two decision sequences diff line-for-line.
+    (window as unknown as { __schedlog: (n: number) => string }).__schedlog = (n: number) => {
+      const lines: string[] = [];
+      setTraceSink(() => {}); // arms the deterministic RNG (trace text discarded)
+      setSchedSink((l) => lines.push(l));
+      runForFrames(n);
+      setSchedSink(null);
       setTraceSink(null);
       return lines.join("\n");
     };
@@ -253,11 +293,16 @@ async function main() {
     let changed = false;
     let budget = 10;
     while (acc >= TICK_MS && budget-- > 0) {
-      acc -= TICK_MS;
       if (thread) {
+        acc -= TICK_MS;
         if (thread.tick()) changed = true;
       } else if (scheduler) {
         if (scheduler.tick()) changed = true;
+        // One scheduler tick advances the engine clock by `mini` time-units
+        // (ads.go then sleeps mini * 20ms), NOT by one. Charge the real cost or
+        // playback runs `mini`× too fast — with clouds running, mini is usually
+        // 8, i.e. ~8× speed. The trace harness is unaffected: it steps by frame.
+        acc -= TICK_MS * scheduler.lastTickCost;
       } else {
         acc = 0;
       }

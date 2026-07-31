@@ -77,13 +77,18 @@ def main():
 
     go = norm(go_trace(ads, tag, frames))
     ts = norm(ts_trace(ads, tag, frames))
-    n = min(len(go), len(ts))  # ignore trailing frames past the shorter window
-    go, ts = go[:n], ts[:n]
 
+    # NEVER truncate to min(len(go), len(ts)). Doing that silently passes any TS
+    # trace that stopped early — it is what inflated the score to a confident
+    # "63/66 identical" when the honest number was 10/66, and it will happily
+    # report a scene as IDENTICAL while sweep.py (which compares strictly)
+    # reports the same scene as a length mismatch. Unequal length IS a failure.
     diff = list(difflib.unified_diff(go, ts, "go-oracle", "ts-port", lineterm=""))
     if not diff:
-        print(f"✅ {ads} tag {tag}: {frames} frames IDENTICAL (go == ts)")
+        print(f"✅ {ads} tag {tag}: {frames} frames IDENTICAL (go == ts, {len(go)} lines)")
         sys.exit(0)
+    if len(go) != len(ts):
+        print(f"❌ {ads} tag {tag}: LENGTH MISMATCH go={len(go)} ts={len(ts)} lines")
     print(f"❌ {ads} tag {tag}: divergence ({sum(1 for d in diff if d[:1] in '+-' and d[:2] not in ('++','--'))} lines)")
     print("\n".join(diff))
     sys.exit(1)

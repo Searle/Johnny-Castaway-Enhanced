@@ -324,6 +324,7 @@ func adsAddScene(ttmSlotNo, ttmTag, arg3 uint16) {
 	ttmThread.settledY = 0
 	numThreads++
 
+	schedLog("ADD idx=%d %d:%d arg3=%d timer=%d iter=%d", i, ttmSlotNo, ttmTag, int16(arg3), ttmThread.sceneTimer, ttmThread.sceneIterations)
 	traceScene(ttmSlotNo, ttmTag)
 }
 
@@ -347,6 +348,7 @@ func adsStopScene(sceneNo int, keepAsDecoration bool) {
 			grRedrawMostCommonSettledSpriteToBg(&ttmThreads[sceneNo])
 		}
 	}
+	schedLog("STOP idx=%d %d:%d", sceneNo, ttmThreads[sceneNo].sceneSlot, ttmThreads[sceneNo].sceneRootTag)
 	grFreeLayer(ttmThreads[sceneNo].ttmLayer)
 	ttmThreads[sceneNo].isRunning = 0
 	numThreads--
@@ -369,6 +371,23 @@ func adsStopSceneByTtmTag(ttmSlotNo, ttmTag uint16, keepAsDecoration bool) {
 			}
 		}
 	}
+}
+
+// schedThreadState renders the thread array compactly for schedLog: one entry
+// per occupied slot as idx=slot:tag/isRunning/timer/delay/sceneTimer.
+func schedThreadState() string {
+	s := ""
+	for i := 0; i < MaxTTMThreads; i++ {
+		t := &ttmThreads[i]
+		if t.isRunning == 0 {
+			continue
+		}
+		s += fmt.Sprintf("{%d=%d:%d r%d t%d d%d st%d}", i, t.sceneSlot, t.sceneRootTag, t.isRunning, t.timer, t.delay, t.sceneTimer)
+	}
+	if s == "" {
+		return "{}"
+	}
+	return s
 }
 
 func isSceneRunning(ttmSlotNo, ttmTag uint16) int {
@@ -404,6 +423,13 @@ func adsRandomPickOp() *TAdsRandOp {
 		if a < partialWeight {
 			break
 		}
+	}
+	if schedLogEnabled {
+		ops := ""
+		for i := 0; i < adsNumRandOps; i++ {
+			ops += fmt.Sprintf("[t%d %d:%d w%d]", adsRandOps[i].ttype, adsRandOps[i].slot, adsRandOps[i].tag, adsRandOps[i].weight)
+		}
+		schedLog("PICK total=%d draw=%d idx=%d ops=%s", totalWeight, a, res, ops)
 	}
 	return &adsRandOps[res]
 }
@@ -546,12 +572,14 @@ func adsPlayChunk(data []byte, dataSize, offset uint32) {
 		case 0x1360:
 			peekUint16Block(data, &offset, args[:], 2)
 			debugPrintf("IF_NOT_RUNNING %d %d\n", args[0], args[1])
+			schedLog("IF_NOT_RUNNING %d %d running=%d skip=%d", args[0], args[1], isSceneRunning(args[0], args[1]), inSkipBlock)
 			if isSceneRunning(args[0], args[1]) != 0 {
 				inSkipBlock = 1
 			}
 		case 0x1370:
 			peekUint16Block(data, &offset, args[:], 2)
 			debugPrintf("IF_IS_RUNNING %d %d\n", args[0], args[1])
+			schedLog("IF_IS_RUNNING %d %d running=%d skip=%d", args[0], args[1], isSceneRunning(args[0], args[1]), inSkipBlock)
 			// r.c - possible bug fixed, the inSkipBlock = 0|1 were swapped originally
 			if isSceneRunning(args[0], args[1]) == 0 {
 				inSkipBlock = 1
@@ -590,6 +618,7 @@ func adsPlayChunk(data []byte, dataSize, offset uint32) {
 		case 0x2005:
 			peekUint16Block(data, &offset, args[:], 4)
 			debugPrintf("ADD_SCENE %d %d %d %d\n", args[0], args[1], args[2], args[3])
+			schedLog("op ADD_SCENE %d %d %d %d skip=%d rand=%d", args[0], args[1], args[2], args[3], inSkipBlock, inRandBlock)
 			if inSkipBlock == 0 { // TODO - TEMPO
 				if inRandBlock != 0 {
 					adsRandomAddScene(args[0], args[1], args[2], args[3])
@@ -600,6 +629,7 @@ func adsPlayChunk(data []byte, dataSize, offset uint32) {
 		case 0x2010:
 			peekUint16Block(data, &offset, args[:], 3)
 			debugPrintf("STOP_SCENE %d %d %d\n", args[0], args[1], args[2])
+			schedLog("op STOP_SCENE %d %d %d skip=%d rand=%d", args[0], args[1], args[2], inSkipBlock, inRandBlock)
 			if inSkipBlock == 0 { // TODO - TEMPO
 				if inRandBlock != 0 {
 					adsRandomStopSceneByTtmTag(args[0], args[1], args[2])
@@ -721,10 +751,12 @@ func adsPlay(adsName string, adsTag uint16) {
 			islandAnimateClouds(&ttmCloudsThread)
 		}
 
+		schedLog("LOOP %s", schedThreadState())
 		for i := 0; i < MaxTTMThreads; i++ {
 			// Call ttmPlay() for each thread which timer reaches 0
 			if ttmThreads[i].isRunning != 0 && ttmThreads[i].timer == 0 {
 				debugPrintf("    ------> Thread #%d\n", i)
+				schedLog("RUN idx=%d %d:%d delay=%d", i, ttmThreads[i].sceneSlot, ttmThreads[i].sceneRootTag, ttmThreads[i].delay)
 				ttmThreads[i].timer = ttmThreads[i].delay
 				ttmPlay(&ttmThreads[i])
 			}
@@ -780,6 +812,7 @@ func adsPlay(adsName string, adsTag uint16) {
 		}
 
 		debugPrintf(" ******* WAIT: %d ticks *******\n", mini)
+		schedLog("MINI %d after=%s", mini, schedThreadState())
 		grUpdateDelay = int(mini)
 
 		// Various threads processes
@@ -814,8 +847,11 @@ func adsPlay(adsName string, adsTag uint16) {
 							ttmThreads[i].ip = offset
 						}
 					} else { // Is there one (or more) IF_LASTPLAYED matching the terminated thread ?
+						reapSlot, reapTag := ttmThreads[i].sceneSlot, ttmThreads[i].sceneRootTag
+						schedLog("REAP idx=%d %d:%d state=%s", i, reapSlot, reapTag, schedThreadState())
 						adsStopScene(i, true)
 						if adsStopRequested == 0 {
+							schedLog("FIRE %d:%d", reapSlot, reapTag)
 							adsPlayTriggeredChunks(data, dataSize, ttmThreads[i].sceneSlot, ttmThreads[i].sceneRootTag)
 						}
 					}

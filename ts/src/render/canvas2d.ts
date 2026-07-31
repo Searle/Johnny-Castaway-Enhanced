@@ -174,6 +174,17 @@ export class Canvas2DRenderer implements Renderer {
     this.savedZones = null;
   }
 
+  removeLayer(layer: Layer): void {
+    const i = this.layers.indexOf(layer as Canvas2DLayer);
+    if (i >= 0) this.layers.splice(i, 1);
+  }
+
+  orderLayers(order: Layer[]): void {
+    // Reorder in place — the layers KEEP their pixels. Any layer not named in
+    // `order` is dropped (its thread is gone).
+    this.layers = order.filter((l): l is Canvas2DLayer => this.layers.includes(l as Canvas2DLayer));
+  }
+
   bakeZone(from: Layer, x: number, y: number, w: number, h: number): void {
     if (!this.savedZones) this.savedZones = new Canvas2DLayer();
     // The source pixels live at (x+dx, y+dy) in the layer's canvas; copy that

@@ -156,20 +156,126 @@ changelog — only things that will save time or prevent repeating mistakes.
 - `traceEnabled` also skips the per-frame pacing sleep in graphics.go (the diff
   steps by frame count, not wall clock).
 
-### Status: 33/66 byte-identical (deterministic)
+### Status: 66/66 byte-identical (deterministic)
 
-Remaining divergence has a narrow signature: the **ADS RANDOM stream goes out of
-phase**. A STOP_SCENE gets dropped from a random block (`inSkip` true where Go
-has it false), so the block's total weight differs (5 vs 6) → `randAds(total)`
-draws against a different modulus → every later pick diverges (STAND:2: TS picks
-36 where Go picks 33). Rooted in reap-vs-chunk-fire timing.
+**How to debug this class of bug** — dump the SCHEDULER DECISION SEQUENCE from
+both engines and diff *that*, not the draw calls. Both sides now emit the same
+`SCHED …` line format:
 
-**How to debug this class of bug** (this is what actually cracked the last three):
-`window.__sched` is exposed in `?dump` mode — wrap `addScene`/`stopScene`/
-`pickRandom` to log the decision sequence, then compare against the Go engine's
-own decisions via `debugEnabled = true` (debug.go:10 — flip, build, revert; it
-writes an untracked `debug.log`). Comparing *decision sequences* beats staring at
-draw-call diffs, because it shows which branch each engine took and why.
+- Go: `JC_SCHED_LOG=1 ./JohnnyCastaway2026 -trace STAND 2 15 2>&1 >/dev/null | grep ^SCHED`
+  (env-gated in `trace.go`; verified to leave the trace byte-identical, so it is
+  safe to leave in — no flip-build-revert needed, unlike `debugEnabled`).
+- TS: `uv run --with playwright python ts/tools/oracle-diff/schedlog.py STAND 2 15`
+  (`window.__schedlog(n)` in `?dump` mode).
+
+Lines cover `op ADD_SCENE/STOP_SCENE` (with the live `skip=`/`rand=` flags),
+`IF_IS_RUNNING`/`IF_NOT_RUNNING` (with the `running=` each engine saw), `PICK`
+(the whole weighted op list, the total, and the draw), `ADD`/`STOP`/`REAP`/`FIRE`,
+and `LOOP`/`MINI` with the full thread array (`{idx=slot:tag rN tTimer dDelay
+stSceneTimer}`). The first line that differs is the bug; everything after it is
+downstream damage. Filter out `STOP idx=` when diffing — Go logs it on the reap
+path too, TS only on the explicit `stopScene`.
+
+**A cautionary tale about that RANDOM-desync theory.** The previous status entry
+here claimed the remaining 33 failures were one root cause: the ADS RANDOM stream
+going out of phase, because a STOP_SCENE was dropped from a random block
+(`inSkip` true where Go had it false), giving a total weight of 5 vs 6 and a
+different modulus. That story was **wrong in every particular** — the decision
+logs showed TS collecting `[stop:61 w1, nop w5]`, total 6, draw 3, picking
+exactly what Go picked. It had been inferred from the downstream draw-call diff
+rather than measured. Ten minutes of decision-sequence logging refuted it. The
+actual causes were four unrelated timing/harness bugs (below). **Diff the
+decisions before believing any story about which branch was taken.**
+
+### The four bugs behind the 33 failures (fixed)
+
+1. **Scene entry didn't reset `delay` to 4.** `adsAddScene` sets `delay = 4`;
+   the TS `TtmThread` constructor fast-forwards the op stream to the entry tag
+   and inherited whatever `SET_DELAY`/`TIMER` it scanned past (STAND:2 entered
+   with 6 and 10). The engine jumps straight to the tag offset and never
+   executes those. Every later frame boundary shifted.
+2. **The `mini` clock was replaced by a 1-per-tick countdown.** ads.go computes
+   `mini` = smallest (`timer`, `delay`) across running threads, subtracts it
+   from every timer, *then* sleeps `mini*20ms`. The port dropped the sleep
+   (correct — the trace steps by frame) but ALSO dropped the subtraction
+   (wrong): that subtraction is what orders thread wake-ups relative to each
+   other. With 1-per-tick, a finished thread had to be force-reaped to avoid
+   stalling, so it died in the same iteration it ended instead of living out
+   its hold while other threads ran frames.
+3. **The background(waves)/clouds threads are a CLOCK, not just scenery.**
+   `adsInitIsland` starts both (`isRunning = 3`); `islandInit` then sets the
+   background thread to delay 8 (overriding the 40 above it), clouds to 8. They
+   draw via `grDrawSprite` straight to the background surface and emit **no**
+   trace lines — so a port that skips them looks fine — but their timers are in
+   the `mini` computation, which quantizes the whole scheduler to an 8-tick
+   grid. Without them `mini` swallows a 150-tick hold whole and every reap lands
+   on the wrong iteration. Modelled in the TS scheduler as pure metronomes
+   (timers only, no rendering). Only 4 scenes are non-ISLAND and must NOT run
+   them: JOHNNY:1, JOHNNY:6, SUZY:1, SUZY:2 (`sceneHasIsland`); everything else
+   either has the ISLAND flag or no story entry at all, and main.go's
+   `if !found || ISLAND` runs `adsInitIsland` for both.
+4. **The trace budget counted the wrong thing.** Go stops at the Nth ENDFRAME
+   (`traceFrameEnd` → `traceReachedBudget` → `adsPlay` returns *before* the
+   mini/reap step). The TS harness counted "ticks that changed the display" —
+   but one tick can run TWO threads and emit two frames, so the TS trace
+   overshot by a frame (16 vs 15) and scenes whose decisions and draw calls were
+   perfectly correct still failed on length. Budget where frames are emitted.
+
+5. **`IF_LASTPLAYED_LOCAL` / `ADD_SCENE_LOCAL` were no-ops.** These (0x1070 /
+   0x1520) occur in exactly ONE place — ACTIVITY.ADS tag 7 — which is why 15
+   frames never reached them. `IF_LASTPLAYED_LOCAL` registers a chunk at
+   RUNTIME (not at `adsLoad` time like the general ones), and a matching local
+   chunk SUPPRESSES the general dispatch for that (slot, tag). `ADD_SCENE_LOCAL`
+   is two-pass: reached via the guard above it, it's just the queued body;
+   replayed later by the trigger, it actually adds the scene (args (?, slot,
+   tag, arg3, ?)). With both stubbed out, the general chunk fired instead and
+   the script branched to scene 4:7 where the engine plays 4:22.
+
+Plus: some entry tags legitimately run dry before the budget fills (STAND:14
+GOSUBs to a one-scene tag; STAND:1's chain can end early on a given RANDOM
+outcome). `runTestMode` / `-traceserver` just loop `adsPlay` again — re-entry
+must NOT re-seed the RNG. The exit condition is ads.go's own `for numThreads
+!= 0` (`isDrained`), not "an END opcode ran" (`isStopped`).
+
+6. **`STOP_SCENE (5, 10)` also stops tags 7 and 8.** An explicit alias in
+   `adsStopSceneByTtmTag`. VISITOR.ADS tag 5 depends on it: the chunk fired by
+   5:9's completion does `STOP_SCENE 5 10` to kill the *running* 5:7 before
+   adding 5:3. Without the alias nothing stopped, 5:7 kept running, and 5:3
+   landed in thread slot 1 instead of 0 — changing frame-emission order from
+   there on. Only visible at 150 frames (670 vs 656).
+
+**Sweep at more than 15 frames.** 15 frames gave a clean 66/66 while ACTIVITY:7
+was still wrong (its local-chunk path is ~19 frames in); 60 frames gave 66/66
+while VISITOR:5 was still wrong (the STOP alias is ~120 frames in). A short
+horizon only proves the OPENING of each scene matches. Current status is
+**66/66 at 15, 60 and 150 frames**.
+
+### The oracle diff cannot see rendering bugs — look at the picture too
+
+The trace compares draw *calls*. A frame whose calls are perfect can still be
+composited or presented wrongly, and the sweep will happily report 66/66. A user
+spotting "Johnny is missing on frame 14 of ACTIVITY:12" found exactly that:
+
+- **Don't present between the reap and the next draw.** ads.go calls
+  `grUpdateDisplay` once per main-loop iteration, BEFORE the reap step — so the
+  moment when the old scene has been reaped and the new ones added but nothing
+  has drawn yet is never shown. The TS `tick()` was reporting a membership
+  change as `changed`, so the dump stepper captured that in-between state: both
+  fresh layers empty, the old one freed → a blank frame. Only a frame that
+  actually RAN counts as a display change.
+- **A thread's layer must outlive an add/stop of some OTHER thread.** In the
+  engine each thread's render texture is made once by `grNewLayer` and only its
+  own `CLEAR_SCREEN` (or `grFreeLayer` at stop) touches it. A `rebuildLayers`
+  that called `resetLayers()` and handed everyone a fresh empty layer to fix
+  compositing ORDER also erased every other running scene's pixels. Reorder the
+  existing layers instead (`orderLayers`), and free exactly one on stop/reap.
+- Not every empty frame is a bug: the engine itself emits draw-less frames (e.g.
+  BUILDING:2's `FRAME 0` is a bare `PURGE`+`ENDFRAME`). Check the oracle trace
+  before "fixing" a blank frame.
+
+**A tick is no longer one time-unit.** `scheduler.tick()` now advances the clock
+by `mini`, so the real-time render loop must charge `TICK_MS * lastTickCost`
+per tick instead of one `TICK_MS`, or playback runs ~8× too fast.
 
 ## Backdrops (SCR) are top-aligned at native size, never stretched
 

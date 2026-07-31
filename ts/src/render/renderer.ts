@@ -54,6 +54,19 @@ export interface Renderer {
   // Remove every layer (e.g. when switching scenes/scripts).
   resetLayers(): void;
 
+  // Drop a single layer (its thread stopped — grFreeLayer).
+  removeLayer(layer: Layer): void;
+
+  // Set the compositing order WITHOUT disturbing any layer's contents. The ADS
+  // scheduler composites by thread-slot index (Go iterates its fixed array
+  // 0→N), but a layer's pixels must survive a reorder: in the engine each
+  // thread's render texture is created once by grNewLayer and only that
+  // thread's own CLEAR_SCREEN wipes it. Rebuilding all layers on every
+  // add/stop (the earlier approach) blanked every OTHER running scene until it
+  // happened to redraw — e.g. ACTIVITY.ADS tag 12, where the seagull scene
+  // starting made Johnny disappear for one frame.
+  orderLayers(order: Layer[]): void;
+
   // COPY_ZONE_TO_BG: bake a rectangle of `from`'s rendered pixels into the
   // persistent "saved zones" layer (grCopyZoneToBg → grSavedZonesLayer), which
   // composites above the background but below active thread layers — so scenery

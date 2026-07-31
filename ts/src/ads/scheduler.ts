@@ -45,6 +45,18 @@ interface Chunk {
 // positionFor lets the caller supply per-scene grDx/grDy (story positioning).
 export type PositionFn = (slot: number, tag: number) => { dx: number; dy: number };
 
+// Scheduler-decision log for the oracle diff — mirrors the Go engine's schedLog
+// (trace.go / JC_SCHED_LOG) line-for-line, so the two DECISION SEQUENCES can be
+// diffed directly. Comparing decisions ("which branch, and why") is far more
+// diagnostic than diffing draw calls. Off unless a sink is installed.
+export let schedSink: ((line: string) => void) | null = null;
+export function setSchedSink(fn: ((line: string) => void) | null): void {
+  schedSink = fn;
+}
+function schedLog(line: string): void {
+  if (schedSink) schedSink(`SCHED ${line}`);
+}
+
 // AdsScheduler runs one .ADS script: it interprets the scene-director bytecode
 // (ADD_SCENE / STOP_SCENE / RANDOM / conditionals), drives all running scene
 // threads with the ads.go main-loop timing, and composites their layers.
@@ -61,20 +73,47 @@ export class AdsScheduler {
   // Fixed slot array (Go's ttmThreads[MaxTTMThreads]); null = free slot.
   private threads: (SceneThread | null)[] = new Array(MAX_THREADS).fill(null);
   private chunks: Chunk[] = [];
+  // Chunks registered at RUNTIME by IF_LASTPLAYED_LOCAL (0x1070), as opposed to
+  // the load-time `chunks` above. Only ACTIVITY.ADS tag 7 uses this. A local
+  // chunk that matches a completed scene REPLACES the general dispatch for that
+  // (slot, tag) — see fireTriggeredChunks.
+  private localChunks: Chunk[] = [];
   private lastPlayed: { slot: number; tag: number } | null = null;
   private stopped = false;
+
+  // The island background (waves) and clouds threads. We don't draw them — the
+  // Canvas2D port uses a baked backdrop, and in the Go engine they render via
+  // grDrawSprite straight to the background surface, emitting NO trace lines.
+  // But they ARE running threads in ads.go's main loop, so their timers take
+  // part in the `mini` computation, and that QUANTIZES the whole scheduler's
+  // clock (clouds delay 8 → mini is usually 8, never a long thread's full hold).
+  // Without them, `mini` collapses a 150-tick hold in one step and every scene's
+  // reap lands on the wrong iteration. So they are modelled as pure metronomes:
+  // timers only, no rendering.
+  //
+  // Set up by adsInitIsland (ads.go) + islandInit (island.go, which overrides
+  // the background thread's delay 40 → 8 and timer → 8 at the end).
+  private bgTimer = 0;
+  private bgDelay = 8;
+  private cloudsTimer = 0;
+  private cloudsDelay = 8;
+  // Non-ISLAND scenes run adsNoIsland() instead, which stops both threads.
+  private islandThreadsRunning = true;
 
   constructor(
     ads: AdsFile,
     slots: Map<number, TtmSlot>,
     renderer: Renderer,
-    opts: { rng?: () => number; position?: PositionFn } = {},
+    opts: { rng?: () => number; position?: PositionFn; island?: boolean } = {},
   ) {
     this.ops = ads.ops;
     this.slots = slots;
     this.renderer = renderer;
     this.rng = opts.rng ?? Math.random;
     this.position = opts.position ?? (() => ({ dx: 0, dy: 0 }));
+    // ISLAND scenes (the default — see sceneHasIsland) run the background/clouds
+    // threads; non-ISLAND ones don't.
+    this.islandThreadsRunning = opts.island ?? true;
   }
 
   // live returns the running scenes in slot order (skipping free slots).
@@ -84,6 +123,19 @@ export class AdsScheduler {
 
   get isStopped(): boolean {
     return this.stopped && this.live().length === 0;
+  }
+
+  // isDrained is the ADS main loop's OWN exit condition: ads.go runs
+  // `for numThreads != 0`, so adsPlay returns as soon as the last thread is
+  // reaped — whether or not an END opcode was ever executed. `isStopped` is a
+  // stricter, browser-facing notion (script explicitly ended AND nothing left
+  // running) and must stay that way: the render loop uses it to decide when
+  // playback is really over. The trace harness needs THIS one to know when a
+  // pass of adsPlay has returned and the script should be re-entered — e.g.
+  // STAND.ADS tag 14, whose entry chunk GOSUBs to a single scene and then runs
+  // dry after one frame with no END in sight (4 trace lines vs the oracle's 60).
+  get isDrained(): boolean {
+    return this.live().length === 0;
   }
 
   get runningCount(): number {
@@ -101,6 +153,15 @@ export class AdsScheduler {
   // restart re-runs from the same entry tag (used by the trace harness to get a
   // clean, seeded run after arming the trace sink — the initial start() at page
   // load happened before the sink/deterministic RNG were set).
+  //
+  // It is ALSO how a finished script is re-entered. adsPlay returns as soon as
+  // no thread is left running, but some entry tags legitimately run dry after a
+  // frame or two (STAND.ADS tag 14 GOSUBs to a one-scene tag; tag 1's chain can
+  // end early on a particular RANDOM outcome) and the engine simply plays them
+  // again — runTestMode and the -traceserver both loop `adsPlay` until the frame
+  // budget fills. Re-entry deliberately does NOT re-seed the RNG: the streams
+  // carry on across passes, which is what keeps the second pass's RANDOM picks
+  // matching the oracle's.
   restart(): void {
     this.start(this.entryTag);
   }
@@ -111,6 +172,13 @@ export class AdsScheduler {
     this.renderer.resetLayers();
     this.threads = new Array(MAX_THREADS).fill(null);
     this.stopped = false;
+    // adsInitIsland state (see the field comments): background delay/timer are
+    // 40/0 initially but islandInit overrides both to 8; clouds are 8/0.
+    this.bgDelay = 8;
+    this.bgTimer = 8;
+    this.cloudsDelay = 8;
+    this.cloudsTimer = 0;
+    this.localChunks = []; // adsLoad resets numAdsChunksLocal
     this.registerChunks(entryTag);
     const ip = this.findTag(entryTag);
     if (ip < 0) {
@@ -175,6 +243,7 @@ export class AdsScheduler {
     let inRand = false;
     let inSkip = false;
     let inOr = false;
+    let inIfLastplayedLocal = false;
     let randOps: RandOp[] = [];
     let cont = true;
 
@@ -189,9 +258,15 @@ export class AdsScheduler {
           inOr = false;
           break;
         case AdsOp.IF_NOT_RUNNING:
+          schedLog(
+            `IF_NOT_RUNNING ${a[0]} ${a[1]} running=${this.isRunning(a[0], a[1]) ? 1 : 0} skip=${inSkip ? 1 : 0}`,
+          );
           if (this.isRunning(a[0], a[1])) inSkip = true;
           break;
         case AdsOp.IF_IS_RUNNING:
+          schedLog(
+            `IF_IS_RUNNING ${a[0]} ${a[1]} running=${this.isRunning(a[0], a[1]) ? 1 : 0} skip=${inSkip ? 1 : 0}`,
+          );
           inSkip = !this.isRunning(a[0], a[1]);
           break;
         case AdsOp.OR:
@@ -204,12 +279,16 @@ export class AdsScheduler {
           else cont = false;
           break;
         case AdsOp.ADD_SCENE:
+          schedLog(
+            `op ADD_SCENE ${a[0]} ${a[1]} ${a[2]} ${a[3]} skip=${inSkip ? 1 : 0} rand=${inRand ? 1 : 0}`,
+          );
           if (!inSkip) {
             if (inRand) randOps.push({ type: "add", slot: a[0], tag: a[1], numPlays: a[2], weight: a[3] });
             else this.addScene(a[0], a[1], a[2]);
           }
           break;
         case AdsOp.STOP_SCENE:
+          schedLog(`op STOP_SCENE ${a[0]} ${a[1]} ${a[2]} skip=${inSkip ? 1 : 0} rand=${inRand ? 1 : 0}`);
           if (!inSkip) {
             if (inRand) randOps.push({ type: "stop", slot: a[0], tag: a[1], numPlays: 0, weight: a[2] });
             else this.stopScene(a[0], a[1]);
@@ -236,13 +315,30 @@ export class AdsScheduler {
           else this.stopped = true;
           cont = false;
           break;
+        case AdsOp.IF_LASTPLAYED_LOCAL:
+          // Registers a chunk at RUNTIME whose body (the ADD_SCENE_LOCAL that
+          // follows) fires when scene (a[0], a[1]) completes, overriding the
+          // load-time IF_LASTPLAYED chunks for that scene. Only ACTIVITY.ADS
+          // tag 7 uses it. Without this the general chunk fired instead and the
+          // script branched to the wrong scene (4:7 where the engine plays 4:22).
+          schedLog(`IF_LASTPLAYED_LOCAL ${a[0]} ${a[1]}`);
+          inIfLastplayedLocal = true;
+          this.localChunks.push({ slot: a[0], tag: a[1], ip: i });
+          break;
+        case AdsOp.ADD_SCENE_LOCAL:
+          // Two passes, as in adsPlayChunk: reached via IF_LASTPLAYED_LOCAL just
+          // above it is only the queued body (nothing to do yet); reached
+          // directly — i.e. replayed later by fireTriggeredChunks — it runs.
+          // args are (?, slot, tag, arg3, ?).
+          if (inIfLastplayedLocal) inIfLastplayedLocal = false;
+          else this.addScene(a[1], a[2], a[3]);
+          break;
+
         case AdsOp.END_IF:
         case AdsOp.IF_UNKNOWN_1:
         case AdsOp.UNKNOWN_2014:
         case AdsOp.UNKNOWN_6:
         case AdsOp.FADE_OUT:
-        case AdsOp.IF_LASTPLAYED_LOCAL:
-        case AdsOp.ADD_SCENE_LOCAL:
           break;
         default:
           // :TAG marker mid-stream — treat as a boundary (end of chunk).
@@ -260,12 +356,20 @@ export class AdsScheduler {
     let a = traceSink ? randAds(total) : Math.floor(this.rng() * total);
     let chosen = randOps[randOps.length - 1];
     let partial = 0;
-    for (const r of randOps) {
+    let idx = randOps.length - 1;
+    for (let k = 0; k < randOps.length; k++) {
+      const r = randOps[k];
       partial += r.weight;
       if (a < partial) {
         chosen = r;
+        idx = k;
         break;
       }
+    }
+    if (schedSink) {
+      const tnum = (t: RandOp["type"]) => (t === "add" ? 0 : t === "stop" ? 1 : 2);
+      const ops = randOps.map((r) => `[t${tnum(r.type)} ${r.slot}:${r.tag} w${r.weight}]`).join("");
+      schedLog(`PICK total=${total} draw=${a} idx=${idx} ops=${ops}`);
     }
     if (chosen.type === "add") this.addScene(chosen.slot, chosen.tag, chosen.numPlays);
     else if (chosen.type === "stop") this.stopScene(chosen.slot, chosen.tag);
@@ -281,12 +385,19 @@ export class AdsScheduler {
     return this.threads.some((s) => s !== null && s.slot === slot && s.rootTag === tag);
   }
 
-  // rebuildLayers re-creates the compositor layers in slot order and rebinds
-  // each live thread to its layer, so compositing (and the frame-emission order
-  // in tick) follows slot index — matching Go's fixed-array iteration.
+  // rebuildLayers re-orders the compositor by thread-slot index, matching Go's
+  // fixed-array iteration in grUpdateDisplay.
+  //
+  // It must NOT re-create the layers. Each thread's layer is created once (in
+  // addScene, like grNewLayer) and keeps its pixels until that thread's own
+  // CLEAR_SCREEN wipes it or the thread stops (grFreeLayer). The earlier version
+  // called resetLayers() and handed every live thread a brand-new empty layer on
+  // every add/stop, which silently erased every OTHER running scene: in
+  // ACTIVITY.ADS tag 12 the seagull scene starting wiped Johnny, who vanished
+  // until his own thread next drew a frame. The oracle diff cannot catch this —
+  // it compares draw CALLS, and the calls were right; only the pixels were lost.
   private rebuildLayers(): void {
-    this.renderer.resetLayers();
-    for (const s of this.live()) s.thread.rebindLayer(this.renderer.newLayer());
+    this.renderer.orderLayers(this.live().map((s) => s.thread.layerRef));
   }
 
   // addScene spawns a TtmThread for (slot, tag) on a fresh layer (adsAddScene).
@@ -321,14 +432,34 @@ export class AdsScheduler {
     const iterations = signed > 0 ? signed - 1 : 0;
     thread.sceneTimer = signed < 0 ? -signed : 0;
     this.threads[idx] = { slot: slotNo, rootTag: tag, thread, iterations, finished: false };
+    schedLog(
+      `ADD idx=${idx} ${slotNo}:${tag} arg3=${signed} timer=${thread.sceneTimer} iter=${iterations}`,
+    );
     this.rebuildLayers(); // keep compositing order = slot order
+  }
+
+  // stopScene ends every thread matching (slot, tag) — adsStopSceneByTtmTag.
+  //
+  // Special case from the engine: STOP_SCENE (5, 10) also stops tags 7 and 8.
+  // VISITOR.ADS tag 5 relies on it — the chunk that fires when 5:9 completes
+  // does STOP_SCENE 5 10 to kill the *running* 5:7 before adding 5:3. Without
+  // the alias nothing was stopped, 5:7 kept running, and 5:3 landed in thread
+  // slot 1 instead of 0 — diverging every later frame's emission order.
+  private stopMatches(s: SceneThread, slotNo: number, tag: number): boolean {
+    if (s.slot !== slotNo) return false;
+    if (slotNo === 5 && tag === 10) {
+      return s.rootTag === 7 || s.rootTag === 8 || s.rootTag === 10;
+    }
+    return s.rootTag === tag;
   }
 
   private stopScene(slotNo: number, tag: number): void {
     let removed = false;
     for (let i = 0; i < this.threads.length; i++) {
       const s = this.threads[i];
-      if (s && s.slot === slotNo && s.rootTag === tag) {
+      if (s && this.stopMatches(s, slotNo, tag)) {
+        schedLog(`STOP idx=${i} ${s.slot}:${s.rootTag}`);
+        this.renderer.removeLayer(s.thread.layerRef); // grFreeLayer
         this.threads[i] = null;
         removed = true;
       }
@@ -336,59 +467,116 @@ export class AdsScheduler {
     if (removed) this.rebuildLayers();
   }
 
-  // tick advances the clock by ONE engine time-unit (~20ms; see TICK_MS in
-  // main.ts) and runs a frame for any scene whose timer reaches 0. A displayed
-  // TTM frame is held for `delay` units before the next runs (ttmPlay sets
-  // delay via SET_DELAY/TIMER; grUpdateDisplay holds it delay*0.02s).
+  // state renders the thread array like Go's schedThreadState (idx=slot:tag,
+  // isRunning, timer, delay, sceneTimer) so the decision logs diff line-for-line.
+  private state(): string {
+    let s = "";
+    for (let i = 0; i < this.threads.length; i++) {
+      const t = this.threads[i];
+      if (!t) continue;
+      const r = t.finished ? 2 : 1;
+      s += `{${i}=${t.slot}:${t.rootTag} r${r} t${t.thread.timer} d${t.thread.delay} st${t.thread.sceneTimer}}`;
+    }
+    return s === "" ? "{}" : s;
+  }
+
+  // tick runs exactly ONE iteration of the ads.go main loop, in the engine's
+  // order:
+  //   1. run every thread whose timer == 0 (timer = delay, then ttmPlay)
+  //   2. emit the frame (our caller presents)
+  //   3. mini = smallest (timer, delay) across running threads
+  //   4. subtract mini from every running thread's timer
+  //   5. for threads now at timer == 0: apply pending goto, drain sceneTimer,
+  //      then replay-or-reap (reaping fires the triggered chunks)
   //
-  // NOTE: the Go loop subtracts `mini` (the smallest timer) each iteration and
-  // then SLEEPS mini*20ms. Because we're driven by a fixed-rate rAF instead of
-  // sleeping, we must instead count each timer down by 1 per tick — subtracting
-  // the whole `mini` here (as an earlier version did) collapsed every scene's
-  // delay into a single tick, so everything ran at a flat frame-per-tick and
-  // the whole script played far too fast.
+  // Step 3/4 is the ENGINE'S CLOCK and must be ported literally. An earlier
+  // version counted every timer down by 1 per tick instead, on the theory that a
+  // fixed-rate rAF replaces Go's `sleep(mini * 20ms)`. That conflates two
+  // different things: the sleep is wall-clock pacing (correctly dropped — the
+  // trace steps by frame, not time), but the SUBTRACTION is what orders thread
+  // wake-ups relative to each other. With 1-per-tick, a finished thread had to
+  // be force-reaped (timer = 0) to avoid stalling, which reaped it in the same
+  // iteration it ended — whereas the engine keeps it alive for the remainder of
+  // its hold, during which OTHER threads run frames. That reordered every
+  // multi-thread scene's frame stream (STAND.ADS tag 2 reaped 1:61 ~20
+  // iterations early). Pacing belongs in the render loop (TICK_MS), not here.
+  // Engine time-units consumed by the last tick() — the `mini` it subtracted.
+  // ads.go sleeps exactly this long (mini * 20ms) after each iteration, so a
+  // real-time caller must pay the same cost or playback runs `mini` times too
+  // fast. The trace harness ignores it (it steps by frame, not wall clock).
+  private lastTickUnits = 1;
+  get lastTickCost(): number {
+    return Math.max(1, this.lastTickUnits);
+  }
+
   tick(): boolean {
     if (this.live().length === 0) return false;
     let changed = false;
+    this.lastTickUnits = 1;
+    schedLog(`LOOP ${this.state()}`);
 
+    // 0. The background/clouds metronomes re-arm when their timer reaches 0,
+    // exactly as ads.go does before the scene threads. They draw nothing here
+    // (see the field comments) — only their timers matter, via `mini` below.
+    if (this.islandThreadsRunning) {
+      if (this.bgTimer <= 0) this.bgTimer = this.bgDelay;
+      if (this.cloudsTimer <= 0) this.cloudsTimer = this.cloudsDelay;
+    }
 
-    // Run ready threads in slot order (Go iterates ttmThreads[0..N]). A thread
-    // that finishes (PURGE/end) is NOT reaped here — like ads.go it keeps its
-    // hold timer and is processed only once that timer reaches 0, on a later
-    // tick. Reaping immediately shifted concurrent scenes' completion by a frame.
+    // 1. Run ready threads in slot order (Go iterates ttmThreads[0..N]).
     for (let i = 0; i < this.threads.length; i++) {
       const s = this.threads[i];
-      if (s === null) continue;
-      if (s.finished) {
-        // A finished thread must NOT hold its slot for `delay` more ticks.
-        // ads.go re-arms timer = delay, then immediately subtracts `mini` (the
-        // smallest timer across running threads) — so a just-finished thread
-        // lands on timer == 0 and is terminated in the SAME loop iteration,
-        // firing its triggered chunks right away. Counting it down 1-per-tick
-        // instead delayed every chain by `delay` ticks (scenes ran a frame or
-        // two short inside the trace budget), and skipping it entirely parked
-        // the timer forever — the deadlock that stopped MARY.ADS tag 2 after
-        // one frame instead of chaining 104 → 17.
-        s.thread.timer = 0;
-        continue;
-      }
+      if (s === null || s.finished) continue;
       if (s.thread.timer <= 0) {
+        schedLog(`RUN idx=${i} ${s.slot}:${s.rootTag} delay=${s.thread.delay}`);
         // ads.go order: timer = (previous frame's) delay, THEN run this frame.
-        s.thread.timer = Math.max(1, s.thread.delay);
+        // SET_DELAY/TIMER inside the frame overwrite both, as in ttm.go.
+        s.thread.timer = s.thread.delay;
         s.thread.runOneFrame();
         changed = true;
-        if (s.thread.isDone) s.finished = true; // mark; process when timer hits 0
-      } else {
-        s.thread.timer -= 1;
+        if (s.thread.isDone) s.finished = true; // isRunning = 2; reaped in step 5
       }
     }
 
-    // Drain the ADS duration timer (ads.go:795-800). For each thread whose hold
-    // timer has elapsed, subtract its delay; when the duration runs out the
-    // scene ends — which is what finally stops a timed PURGE-looping scene
-    // (PURGE itself only loops it back while sceneTimer != 0).
+    // 2. The trace's frame budget stops the run right after the frame is
+    // emitted — ads.go returns from adsPlay on traceReachedBudget, BEFORE the
+    // mini/reap step below. Bail at the same point so the oracle sees the same
+    // final frame and the same trailing state.
+    if (TtmThread.traceReachedBudget) return changed;
+
+    // 3. mini = min over RUNNING threads (incl. finished-but-unreaped, which are
+    // isRunning == 2 in Go and still counted) of both `delay` and `timer` —
+    // plus the background/clouds threads' timers, which is what keeps `mini`
+    // small (usually 8) instead of swallowing a long hold whole.
+    let mini = 300;
+    if (this.islandThreadsRunning) {
+      mini = this.bgTimer;
+      if (this.cloudsTimer < mini) mini = this.cloudsTimer;
+    }
     for (const s of this.live()) {
-      if (s.finished || s.thread.timer > 0) continue;
+      if (s.thread.delay < mini) mini = s.thread.delay;
+      if (s.thread.timer < mini) mini = s.thread.timer;
+    }
+
+    // 4. Decrease all timers by the shortest one.
+    this.bgTimer -= mini;
+    this.cloudsTimer -= mini;
+    for (const s of this.live()) s.thread.timer -= mini;
+    this.lastTickUnits = mini;
+    schedLog(`MINI ${mini} after=${this.state()}`);
+
+    // 5. Post-step processing for threads whose timer has now elapsed.
+    let membershipChanged = false;
+    for (let i = 0; i < this.threads.length; i++) {
+      const s = this.threads[i];
+      if (!s || s.thread.timer > 0) continue;
+
+      // Pending goto is applied by runOneFrame at the start of the next frame,
+      // which is where ads.go's `ip = nextGotoOffset` lands too.
+
+      // Drain the ADS duration timer (ADD_SCENE arg3 < 0). This is what finally
+      // stops a timed PURGE-looping scene — PURGE only loops it while sceneTimer
+      // != 0; the countdown here is what ends it.
       if (s.thread.sceneTimer > 0) {
         s.thread.sceneTimer -= s.thread.delay;
         if (s.thread.sceneTimer <= 0) {
@@ -397,31 +585,37 @@ export class AdsScheduler {
           s.finished = true;
         }
       }
-    }
 
-    // Process finished threads whose hold timer has now elapsed: iteration
-    // replay, else free the slot + fire triggered chunks. Slot order so a
-    // chunk's ADD_SCENE reuses the lowest freed slot (matching adsAddScene).
-    let membershipChanged = false;
-    for (let i = 0; i < this.threads.length; i++) {
-      const s = this.threads[i];
-      if (!s || !s.finished || s.thread.timer > 0) continue;
+      if (!s.finished) continue;
+
+      // Iteration replay (ADD_SCENE arg3 > 0) takes precedence over reaping.
       if (s.iterations > 0) {
         s.iterations--;
-        s.thread.restart(true); // iteration replay keeps the timer (ads.go)
+        s.thread.restart(true); // keeps the timer, as ads.go does
         s.finished = false;
         continue;
       }
+
+      schedLog(`REAP idx=${i} ${s.slot}:${s.rootTag} state=${this.state()}`);
       this.lastPlayed = { slot: s.slot, tag: s.rootTag };
+      this.renderer.removeLayer(s.thread.layerRef); // adsStopScene → grFreeLayer
       this.threads[i] = null;
       membershipChanged = true;
-      this.fireTriggeredChunks(s.slot, s.rootTag);
+      if (!this.stopped) {
+        schedLog(`FIRE ${s.slot}:${s.rootTag}`);
+        this.fireTriggeredChunks(s.slot, s.rootTag);
+      }
     }
-    if (membershipChanged) {
-      this.rebuildLayers();
-      changed = true;
-    }
+    if (membershipChanged) this.rebuildLayers();
 
+    // NOTE: a membership change alone is deliberately NOT reported as `changed`.
+    // ads.go calls grUpdateDisplay once per iteration, BEFORE the reap step —
+    // so the instant between "old scene reaped, new scenes added" and "a new
+    // scene draws its first frame" is never presented. Returning true there made
+    // the dump stepper capture that in-between state, which is momentarily blank
+    // (both fresh layers empty, the old one freed): ACTIVITY.ADS tag 12 looked
+    // like Johnny vanishing for a frame. The draw-call trace was correct
+    // throughout — only the presented moment was wrong.
     return changed;
   }
 
@@ -430,6 +624,20 @@ export class AdsScheduler {
   // scene's completion (adsPlayTriggeredChunks). This is how MARY.ADS advances
   // from one date beat to the next (IF_LASTPLAYED (4,24) → ADD_SCENE (4,12)…).
   private fireTriggeredChunks(slot: number, tag: number): void {
+    // A runtime IF_LASTPLAYED_LOCAL chunk takes precedence and SUPPRESSES the
+    // general dispatch — but only for the (slot, tag) it actually matched, not
+    // globally (adsPlayTriggeredChunks: `localMatched`, the r.c. fix noted
+    // there). Each local chunk fires once, then is consumed.
+    let localMatched = false;
+    for (let i = this.localChunks.length - 1; i >= 0; i--) {
+      const c = this.localChunks[i];
+      if (c.slot === slot && c.tag === tag) {
+        this.localChunks.splice(i, 1);
+        this.playChunk(c.ip);
+        localMatched = true;
+      }
+    }
+    if (localMatched) return;
     for (const c of this.chunks) {
       if (c.slot === slot && c.tag === tag) this.playChunk(c.ip);
     }

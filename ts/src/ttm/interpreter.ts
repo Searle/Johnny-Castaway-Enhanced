@@ -126,6 +126,14 @@ export class TtmThread {
     if (target >= 0) this.fastForwardTo(target);
 
     // Enter the scene fresh: run its first frame on the very next tick.
+    // delay MUST be reset to 4 here, matching adsAddScene (ads.go: `delay = 4;
+    // timer = 0`). The engine enters a scene by jumping straight to the tag
+    // offset, so it never inherits a delay from the prologue — whereas our
+    // fastForwardTo replays the op stream and picks up whatever SET_DELAY/TIMER
+    // it scanned past. Leaving that stale delay in place made a scene's FIRST
+    // frame hold for the wrong number of ticks (STAND.ADS tag 2: 6 and 10 ticks
+    // where the engine uses 4 and 4), which shifts every later frame boundary.
+    this.delayVal = 4;
     this.timerVal = 0;
     this.nextGoto = -1;
   }
@@ -190,9 +198,17 @@ export class TtmThread {
     this.layer.setOrigin(dx, dy);
   }
 
-  // rebindLayer moves this thread's drawing to a new layer (used when the ADS
-  // scheduler rebuilds the layer stack after a scene stops). Reapplies origin;
-  // the next frame redraws content (TTM frames are self-contained via CLEAR).
+  // The thread's own drawing surface, created once when the scene is added
+  // (grNewLayer) and kept for the scene's whole life — the ADS scheduler needs
+  // it to set compositing order without disturbing any layer's pixels.
+  get layerRef(): Layer {
+    return this.layer;
+  }
+
+  // rebindLayer moves this thread's drawing to a different layer. Reapplies
+  // origin; the next frame redraws content (TTM frames are self-contained via
+  // CLEAR). Not used by the ADS scheduler any more — reordering preserves
+  // layers instead — but kept for callers that genuinely re-home a thread.
   rebindLayer(layer: Layer): void {
     this.layer = layer;
     this.layer.setOrigin(this.originDx, this.originDy);
@@ -308,7 +324,14 @@ export class TtmThread {
       }
       if (this.execOne()) {
         // Frame complete (UPDATE). Apply any pending PURGE result.
-        if (!this.suppressDraw) trace("  ENDFRAME");
+        if (!this.suppressDraw) {
+          trace("  ENDFRAME");
+          // traceFrameEnd (trace.go): the budget is checked HERE, at the frame
+          // that was just completed, and stops the run immediately.
+          if (TtmThread.traceMaxFrame > 0 && TtmThread.traceFrameNo >= TtmThread.traceMaxFrame) {
+            TtmThread.traceReachedBudget = true;
+          }
+        }
         if (this.pendingDone) {
           this.done = true;
           this.pendingDone = false;
@@ -324,6 +347,19 @@ export class TtmThread {
   // Global displayed-frame counter for the trace (matches the Go -trace numbering
   // across all scenes in a run). Reset by the harness between runs.
   static traceFrameNo = 0;
+
+  // Frame budget, mirroring the Go engine's traceMaxFrame / traceReachedBudget
+  // (trace.go). The Go trace stops the instant the Nth ENDFRAME is written and
+  // adsPlay returns — so the oracle's trace is exactly N frames. The TS harness
+  // used to count "ticks that changed the display" instead, which is NOT the
+  // same thing: one scheduler tick can run TWO threads (two frames), and after
+  // the mini-clock port a tick can also report a change for a reap alone. That
+  // let the TS trace overshoot by a frame (FISHING/JOHNNY/SUZY: 16 frames vs
+  // Go's 15) and every such scene failed on length alone while its decision
+  // sequence and draw calls were correct. Count frames here, where they are
+  // actually emitted, exactly as traceFrameEnd does.
+  static traceMaxFrame = 0;
+  static traceReachedBudget = false;
 
   // execOne executes a single opcode, advancing ip. Returns true if it was
   // UPDATE (end of frame). Shared by runFrame and the prologue.
