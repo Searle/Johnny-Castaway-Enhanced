@@ -8,6 +8,8 @@ Usage (from ts/, with a vite server on :5199 and the Go binary built):
     uv run --with playwright python tools/oracle-diff/sweep.py [frames]
 """
 import json, os, sys, subprocess, re, difflib, time
+import functools
+print = functools.partial(print, flush=True)  # observable in background runs
 
 HERE = os.path.dirname(__file__)
 TS = os.path.abspath(os.path.join(HERE, "..", ".."))
