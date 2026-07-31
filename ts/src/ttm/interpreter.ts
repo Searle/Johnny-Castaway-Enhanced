@@ -9,29 +9,43 @@ import type { Layer, Renderer } from "../render/renderer";
 export let traceSink: ((line: string) => void) | null = null;
 export function setTraceSink(fn: ((line: string) => void) | null): void {
   traceSink = fn;
-  traceRngState = 0x1234abcd; // reset the deterministic RNG when (dis)arming trace
+  // Reset both deterministic streams to their seeds when (dis)arming trace.
+  rngAds = 0x1234abcd;
+  rngTimer = 0x9e3779b9;
 }
 function trace(line: string): void {
   if (traceSink) traceSink(line);
 }
 
-// Deterministic mulberry32 PRNG, mirroring trace.go's traceRandN with the SAME
-// seed. Used at the RANDOM/TIMER sites ONLY while the trace sink is active, so
-// the oracle diff sees identical random choices in both engines. Outside trace
-// mode, playback uses Math.random as before.
-let traceRngState = 0x1234abcd;
-export function traceRandN(n: number): number {
-  if (n <= 0) return 0;
-  traceRngState = (traceRngState + 0x6d2b79f5) >>> 0;
-  let z = traceRngState;
+// Two independent deterministic mulberry32 streams mirroring trace.go: one for
+// ADS scene selection (randAds), one for the TTM TIMER opcode (randTimer). Kept
+// separate so TIMER consumption (which varies with concurrent-scene frame
+// interleaving) can't shift the ADS pick and select a different scene. Active
+// only while the trace sink is set; normal playback uses Math.random.
+let rngAds = 0x1234abcd;
+let rngTimer = 0x9e3779b9;
+function mulberry32(state: number, n: number): [number, number] {
+  state = (state + 0x6d2b79f5) >>> 0;
+  let z = state;
   z = Math.imul(z ^ (z >>> 15), z | 1) >>> 0;
   z = (z ^ (z + (Math.imul(z ^ (z >>> 7), z | 61) >>> 0))) >>> 0;
   z = (z ^ (z >>> 14)) >>> 0;
-  return z % n;
+  return [state, z % n];
 }
-// randInt returns a deterministic value in [0,n) under trace, else Math.random.
-export function randInt(n: number): number {
-  return traceSink ? traceRandN(n) : Math.floor(Math.random() * n);
+// randAds/randTimer: deterministic in [0,n) under trace, else Math.random.
+export function randAds(n: number): number {
+  if (n <= 0) return 0;
+  if (!traceSink) return Math.floor(Math.random() * n);
+  const [s, v] = mulberry32(rngAds, n);
+  rngAds = s;
+  return v;
+}
+export function randTimer(n: number): number {
+  if (n <= 0) return 0;
+  if (!traceSink) return Math.floor(Math.random() * n);
+  const [s, v] = mulberry32(rngTimer, n);
+  rngTimer = s;
+  return v;
 }
 
 // A parsed tag: a jump target the GOTO_TAG / PURGE opcodes reference.
@@ -313,7 +327,7 @@ export class TtmThread {
           // (min,max) range → uniform random delay, matching the Go 0x2022.
           const lo = a[0],
             hi = a[1];
-          this.delayVal = hi > lo ? lo + randInt(hi - lo + 1) : lo;
+          this.delayVal = hi > lo ? lo + randTimer(hi - lo + 1) : lo;
           this.timerVal = this.delayVal;
           if (!this.suppressDraw) trace(`  DELAY ${this.delayVal}`);
           break;

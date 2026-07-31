@@ -394,7 +394,7 @@ func adsRandomPickOp() *TAdsRandOp {
 
 	var a int
 	if traceEnabled {
-		a = traceRandN(totalWeight) // deterministic in trace mode (oracle diff)
+		a = traceRandAds(totalWeight) // deterministic ADS stream (oracle diff)
 	} else {
 		a = rand.Intn(totalWeight)
 	}

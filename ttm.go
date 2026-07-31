@@ -306,7 +306,7 @@ func ttmPlay(ttmThread *TTtmThread) {
 			var val uint16
 			if hi > lo {
 				if traceEnabled {
-					val = lo + uint16(traceRandN(int(hi-lo)+1)) // deterministic in trace mode
+					val = lo + uint16(traceRandTimer(int(hi-lo)+1)) // deterministic TIMER stream
 				} else {
 					val = lo + uint16(rand.Intn(int(hi-lo)+1))
 				}

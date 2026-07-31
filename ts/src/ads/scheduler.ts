@@ -1,5 +1,5 @@
 import { AdsOp, ADS_OPCODES } from "./opcodes";
-import { TtmThread, traceSink, randInt } from "../ttm/interpreter";
+import { TtmThread, traceSink, randAds } from "../ttm/interpreter";
 import { loadAdsFile, loadAnimation, type AdsFile, type Op, type Manifest, type LoadedSheet } from "../manifest";
 import type { Renderer } from "../render/renderer";
 
@@ -96,8 +96,18 @@ export class AdsScheduler {
     return this.live().map((s) => ({ slot: s.slot, tag: s.rootTag, delay: s.thread.delay }));
   }
 
+  private entryTag = 0;
+
+  // restart re-runs from the same entry tag (used by the trace harness to get a
+  // clean, seeded run after arming the trace sink — the initial start() at page
+  // load happened before the sink/deterministic RNG were set).
+  restart(): void {
+    this.start(this.entryTag);
+  }
+
   // start runs the ADS chunk at the given entry tag (adsPlay → adsPlayChunk).
   start(entryTag: number): void {
+    this.entryTag = entryTag;
     this.renderer.resetLayers();
     this.threads = new Array(MAX_THREADS).fill(null);
     this.stopped = false;
@@ -247,7 +257,7 @@ export class AdsScheduler {
     if (total <= 0) return;
     // In trace mode use the deterministic RNG (matches the Go engine's
     // traceRandN(totalWeight)); otherwise the injected/Math.random rng.
-    let a = traceSink ? randInt(total) : Math.floor(this.rng() * total);
+    let a = traceSink ? randAds(total) : Math.floor(this.rng() * total);
     let chosen = randOps[randOps.length - 1];
     let partial = 0;
     for (const r of randOps) {

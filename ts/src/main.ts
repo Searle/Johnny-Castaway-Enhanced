@@ -211,8 +211,13 @@ async function main() {
     // oracle diff. Deterministic: steps by displayed frame, not wall clock.
     (window as unknown as { __trace: (n: number) => string }).__trace = (n: number) => {
       const lines: string[] = [];
-      setTraceSink((l) => lines.push(l));
+      setTraceSink((l) => lines.push(l)); // arms the deterministic RNG too
       TtmThread.traceFrameNo = 0;
+      // Re-run from the entry tag with the sink armed, so the ADS RANDOM picks
+      // and TIMER draws use the seeded RNG. The initial start() at page load ran
+      // before the sink was set (using Math.random) — that made the first trace
+      // differ from later ones. (TTM single-scene mode has no ADS RNG to reseed.)
+      if (scheduler) scheduler.restart();
       let produced = 0;
       let guard = 1_000_000;
       while (produced < n && guard-- > 0) {
