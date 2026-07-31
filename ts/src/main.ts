@@ -33,6 +33,9 @@ function stopPlayback() {
   scheduler = null;
   renderer.resetLayers();
   renderer.setBackground(null);
+  // Cleared here (start of every load) so the harness never observes a stale
+  // ready flag from a previous scene while the new one is still loading.
+  (window as unknown as { __ready?: boolean }).__ready = false;
 }
 
 // ---- TTM single-scene mode ----
@@ -48,6 +51,7 @@ async function loadTtmScene(entry: IndexEntry, tag: number) {
     thread = new TtmThread(manifest, sheets, renderer, layer, tag);
     frames = 0;
     renderer.present();
+    (window as unknown as { __ready?: boolean }).__ready = true;
   } catch (err) {
     if (token === loadToken) hud.textContent = `error: ${(err as Error).message}`;
     console.error(err);
@@ -69,6 +73,9 @@ async function loadAdsScript(entry: AdsIndexEntry, entryTag: number) {
     scheduler.start(entryTag);
     frames = 0;
     renderer.present();
+    // Signal to the oracle harness that assets are decoded and playback is
+    // live, so it can poll instead of guessing with a fixed sleep.
+    (window as unknown as { __ready?: boolean }).__ready = true;
   } catch (err) {
     if (token === loadToken) hud.textContent = `error: ${(err as Error).message}`;
     console.error(err);

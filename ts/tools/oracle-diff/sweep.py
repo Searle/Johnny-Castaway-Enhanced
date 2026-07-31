@@ -7,7 +7,7 @@ was the bottleneck). The Go trace still needs one process launch per scene.
 Usage (from ts/, with a vite server on :5199 and the Go binary built):
     uv run --with playwright python tools/oracle-diff/sweep.py [frames]
 """
-import json, os, sys, subprocess, re, difflib, time
+import json, os, sys, subprocess, re, difflib
 import functools
 print = functools.partial(print, flush=True)  # observable in background runs
 
@@ -33,8 +33,10 @@ def go_trace(ads, tag, frames):
     if os.path.exists(p):
         os.remove(p)
     env = {**os.environ, "GO_TRACE_OUT": p}
+    # -window: run the oracle in a normal decorated window (nicer to watch than
+    # the borderless screensaver window). Trace mode still exits on frame budget.
     try:
-        subprocess.run([GO_BIN, "-trace", ads, str(tag), str(frames)],
+        subprocess.run([GO_BIN, "-trace", ads, str(tag), str(frames), "-window"],
                        cwd=REPO, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=45, env=env)
     except subprocess.TimeoutExpired:
         return None
@@ -67,27 +69,40 @@ def main():
             try:
                 page.goto(f"{TS_URL}/?ads={name}.ADS&tag={tag}&dump=1", wait_until="networkidle")
                 page.wait_for_function("() => typeof window.__trace === 'function'", timeout=8000)
-                time.sleep(0.8)
+                # Poll for assets-decoded-and-playback-live instead of a blind
+                # sleep. A short/partial TS trace (assets still loading) was the
+                # real source of the run-to-run flake: it shrank `n` so a
+                # truncated prefix silently "passed".
+                page.wait_for_function("() => window.__ready === true", timeout=8000)
                 ts = page.evaluate(f"() => window.__trace({frames})")
             except Exception as e:
                 errored.append((name, tag, str(e)[:60]))
                 print(f"  ERR  {name}.ADS tag {tag}  ({str(e)[:50]})")
                 continue
             g, t = norm(go), norm(ts)
-            n = min(len(g), len(t))
-            if g[:n] == t[:n] and n > 0:
+            # Length mismatch is now a FAILURE, not silently truncated to
+            # min(len). If one side is short, the traces genuinely disagree —
+            # either a real early-stop divergence or (if flaky) a harness bug we
+            # want visible, not hidden behind a passing prefix.
+            if len(g) != len(t):
+                failed.append((name, tag, f"len {len(g)}vs{len(t)}"))
+                print(f"  DIFF {name}.ADS tag {tag}  (length {len(g)} vs {len(t)})")
+            elif len(g) == 0:
+                errored.append((name, tag, "empty trace"))
+                print(f"  ERR  {name}.ADS tag {tag}  (empty trace)")
+            elif g == t:
                 passed.append((name, tag))
-                print(f"  ok   {name}.ADS tag {tag}  ({n} lines)")
+                print(f"  ok   {name}.ADS tag {tag}  ({len(g)} lines)")
             else:
-                d = sum(1 for x in difflib.unified_diff(g[:n], t[:n]) if x[:1] in "+-" and x[:2] not in ("++", "--"))
-                failed.append((name, tag, d))
+                d = sum(1 for x in difflib.unified_diff(g, t) if x[:1] in "+-" and x[:2] not in ("++", "--"))
+                failed.append((name, tag, f"{d} lines"))
                 print(f"  DIFF {name}.ADS tag {tag}  ({d} lines differ)")
         browser.close()
 
     print()
     print(f"=== {len(passed)}/{len(jobs)} identical | {len(failed)} diverge | {len(errored)} errored ({frames} frames) ===")
     if failed:
-        print("Diverging:", ", ".join(f"{n}:{t}({d})" for n, t, d in failed))
+        print("Diverging:", ", ".join(f"{n}:{t} ({d})" for n, t, d in failed))
     if errored:
         print("Errored:", ", ".join(f"{n}:{t}" for n, t, _ in errored))
     sys.exit(1 if failed else 0)
