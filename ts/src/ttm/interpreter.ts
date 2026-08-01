@@ -89,8 +89,14 @@ export class TtmThread {
   // Base (first-loaded) sheet per slot — CLEAR_IMGSLOT restores to this.
   private baseBmpSlots: (LoadedSheet | null)[] = new Array(6).fill(null);
   private readonly palette: string[];
-  private fgColor = 0; // SET_COLORS args — palette indices for primitives
-  private bgColor = 0;
+  // SET_COLORS args — palette indices for primitives (lines, rects, circles,
+  // pixels). Both start at 0x0f, matching adsAddScene (ads.go: `fgColor = 0x0f;
+  // bgColor = 0x0f`) — a scene that draws a primitive BEFORE its first
+  // SET_COLORS inherits that, not black. VISITOR:4/6/7 do exactly that (the
+  // visitor's net/rigging lines), and defaulting to 0 drew them in colour 0
+  // where the engine uses 15.
+  private fgColor = 0x0f;
+  private bgColor = 0x0f;
 
   // In the real engine the ADS scheduler enters a TTM at the byte offset of a
   // chosen scene *tag* (ads.go sets ip = ttmFindTag(sceneRootTag)), not at 0.
@@ -445,16 +451,19 @@ export class TtmThread {
           break;
 
         case Op.DRAW_LINE:
+          if (!this.suppressDraw) trace(`  LINE ${s16(a[0])},${s16(a[1])}-${s16(a[2])},${s16(a[3])} c=${this.fgColor}`);
           if (!this.suppressDraw)
             this.layer.drawLine(s16(a[0]), s16(a[1]), s16(a[2]), s16(a[3]), this.color(this.fgColor));
           break;
         case Op.DRAW_RECT:
           // args: x, y, w, h (w/h are unsigned sizes)
+          if (!this.suppressDraw) trace(`  RECT ${s16(a[0])},${s16(a[1])} ${a[2]}x${a[3]} c=${this.fgColor}`);
           if (!this.suppressDraw)
             this.layer.drawRect(s16(a[0]), s16(a[1]), a[2], a[3], this.color(this.fgColor));
           break;
         case Op.DRAW_CIRCLE: {
           if (this.suppressDraw) break;
+          trace(`  CIRCLE ${s16(a[0])},${s16(a[1])} ${a[2]}x${a[3]} fg=${this.fgColor} bg=${this.bgColor}`);
           // args: x, y, w, h — filled with bgColor, outlined with fgColor.
           const fg = this.color(this.fgColor);
           const bg = this.color(this.bgColor);
@@ -462,6 +471,7 @@ export class TtmThread {
           break;
         }
         case Op.DRAW_PIXEL:
+          if (!this.suppressDraw) trace(`  PIXEL @${s16(a[0])},${s16(a[1])} c=${this.fgColor}`);
           if (!this.suppressDraw) this.layer.drawPixel(s16(a[0]), s16(a[1]), this.color(this.fgColor));
           break;
 

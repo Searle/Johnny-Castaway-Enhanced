@@ -349,6 +349,7 @@ func ttmPlay(ttmThread *TTtmThread) {
 			debugPrintf("\tSAVE_IMAGE1 %d %d %d %d\n", args[0], args[1], args[2], args[3])
 			grSaveImage1(ttmThread.ttmLayer, args[0], args[1], args[2], args[3])
 		case 0xA002:
+			traceOp("PIXEL @%d,%d c=%d", int16(args[0]), int16(args[1]), ttmThread.fgColor)
 			debugPrintf("\tDRAW_PIXEL %d %d\n", args[0], args[1])
 			grDrawPixel(ttmThread.ttmLayer, int16(args[0]), int16(args[1]), ttmThread.fgColor)
 		case 0xA054:
@@ -365,13 +366,16 @@ func ttmPlay(ttmThread *TTtmThread) {
 			// r.c. if I enable this, the stupid copied zone, disappears too soon!!
 			grRestoreZone(ttmThread.ttmLayer, args[0], args[1], args[2], args[3])
 		case 0xA0A4:
+			traceOp("LINE %d,%d-%d,%d c=%d", int16(args[0]), int16(args[1]), int16(args[2]), int16(args[3]), ttmThread.fgColor)
 			debugPrintf("\tDRAW_LINE %d %d %d %d\n", args[0], args[1], args[2], args[3])
 			grDrawLine(ttmThread.ttmLayer, int16(args[0]), int16(args[1]), int16(args[2]), int16(args[3]), ttmThread.fgColor)
 		case 0xA104:
+			traceOp("RECT %d,%d %dx%d c=%d", int16(args[0]), int16(args[1]), args[2], args[3], ttmThread.fgColor)
 			debugPrintf("\tDRAW_RECT %d %d %d %d\n", args[0], args[1], args[2], args[3])
 			trackLastRect(ttmThread, int16(args[0]), int16(args[1]), args[2], args[3], ttmThread.fgColor)
 			grDrawRect(ttmThread.ttmLayer, ttmThread.ttmSlot, int16(args[0]), int16(args[1]), args[2], args[3], ttmThread.fgColor)
 		case 0xA404:
+			traceOp("CIRCLE %d,%d %dx%d fg=%d bg=%d", int16(args[0]), int16(args[1]), args[2], args[3], ttmThread.fgColor, ttmThread.bgColor)
 			debugPrintf("\tDRAW_CIRCLE %d %d %d %d\n", args[0], args[1], args[2], args[3])
 			grDrawCircle(ttmThread.ttmLayer, int16(args[0]), int16(args[1]), args[2], args[3], ttmThread.fgColor, ttmThread.bgColor)
 		case 0xA504:
@@ -379,6 +383,7 @@ func ttmPlay(ttmThread *TTtmThread) {
 			traceDraw(int16(args[0]), int16(args[1]), args[2], args[3], false)
 			traceDrawResolved(ttmThread.ttmSlot, args[2], args[3])
 			traceClip(ttmThread.ttmLayer)
+			traceDumpCel(ttmThread.ttmSlot, args[2], args[3])
 			trackThreadMovement(ttmThread, int16(args[0]), int16(args[1]))
 			trackLastDraw(ttmThread, int16(args[0]), int16(args[1]), args[2], args[3], false)
 			grDrawSprite(ttmThread.ttmLayer, ttmThread.ttmSlot, int16(args[0]), int16(args[1]), args[2], args[3])
@@ -387,6 +392,7 @@ func ttmPlay(ttmThread *TTtmThread) {
 			traceDraw(int16(args[0]), int16(args[1]), args[2], args[3], true)
 			traceDrawResolved(ttmThread.ttmSlot, args[2], args[3])
 			traceClip(ttmThread.ttmLayer)
+			traceDumpCel(ttmThread.ttmSlot, args[2], args[3])
 			trackThreadMovement(ttmThread, int16(args[0]), int16(args[1]))
 			trackLastDraw(ttmThread, int16(args[0]), int16(args[1]), args[2], args[3], true)
 			grDrawSpriteFlip(ttmThread.ttmLayer, ttmThread.ttmSlot, int16(args[0]), int16(args[1]), args[2], args[3])

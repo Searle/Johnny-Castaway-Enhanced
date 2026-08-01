@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	rl "github.com/gen2brain/raylib-go/raylib"
 )
@@ -222,4 +223,36 @@ func traceFrameEnd() bool {
 	fmt.Fprintln(traceOut, "  ENDFRAME")
 	traceFrameNo++
 	return traceMaxFrame > 0 && traceFrameNo >= traceMaxFrame
+}
+
+// traceDumpCel writes one decoded sprite cel from the ENGINE's own texture to a
+// PNG, so it can be compared against the extractor's PNG for the same cel. The
+// two share decoder logic and palette construction, so any difference is in the
+// resource bytes each one is reading — which is not decidable by reading code.
+// Set JC_DUMP_CEL="SHEET.BMP:index:/path/out.png".
+func traceDumpCel(slot *TTtmSlot, spriteNo, imageNo uint16) {
+	spec := os.Getenv("JC_DUMP_CEL")
+	if spec == "" || slot == nil {
+		return
+	}
+	parts := strings.Split(spec, ":")
+	if len(parts) != 3 {
+		return
+	}
+	want, idx, out := parts[0], 0, parts[2]
+	fmt.Sscanf(parts[1], "%d", &idx)
+	if int(imageNo) >= len(slot.slotBmpNames) || slot.slotBmpNames[imageNo] != want || int(spriteNo) != idx {
+		return
+	}
+	tex := slot.sprites[imageNo][spriteNo]
+	if tex == nil {
+		return
+	}
+	img := rl.LoadImageFromTexture(*tex)
+	if img == nil {
+		return
+	}
+	defer rl.UnloadImage(img)
+	rl.ExportImage(*img, out)
+	fmt.Fprintf(os.Stderr, "[dumpcel] wrote %s (%dx%d)\n", out, tex.Width, tex.Height)
 }
