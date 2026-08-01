@@ -355,7 +355,6 @@ async function main() {
   // Shared render loop.
   let acc = 0;
   let last = performance.now();
-  let presented = false;
   // Composite at the scheduler's grUpdateDisplay point (inside tick, before the
   // reap frees a finished scene's layer) rather than after the tick returns —
   // otherwise a scene's final frame is lost (BUILDING.ADS tag 1). This also
@@ -365,16 +364,15 @@ async function main() {
     if (scheduler && !scheduler.onPresent) {
       scheduler.onPresent = () => {
         renderer.present();
-        presented = true;
         frames++;
       };
     }
   };
+  let framesAtPassStart = -1; // frames emitted before the current adsPlay pass
   function loop(now: number) {
     acc += now - last;
     last = now;
     attachPresent();
-    presented = false;
     let changed = false;
     let budget = 10;
     while (acc >= TICK_MS && budget-- > 0) {
@@ -388,20 +386,37 @@ async function main() {
         // playback runs `mini`× too fast — with clouds running, mini is usually
         // 8, i.e. ~8× speed. The trace harness is unaffected: it steps by frame.
         acc -= TICK_MS * scheduler.lastTickCost;
+        // The script ran dry: re-enter the entry tag, exactly as the engine's
+        // `for !shouldExitApp { adsPlay(...) }` does (main.go) — adsPlay returns
+        // as soon as no thread is left running, and some tags legitimately run
+        // dry (VISITOR:4, STAND:14). Without this the scheduler ticks a dead
+        // thread list forever: tick() returns at once, nothing ever presents
+        // again, and it reads as a hang. It never reported "(stopped)" either,
+        // because a tag that drains without an END leaves `stopped` false.
+        //
+        // Guard against a tag that emits NOTHING per pass, which would restart
+        // every iteration and spin — the same check the trace path uses.
+        if (scheduler.isDrained && !scheduler.isStopped) {
+          if (frames === framesAtPassStart) break;
+          framesAtPassStart = frames;
+          scheduler.restart();
+        }
       } else {
         acc = 0;
       }
     }
-    if (changed || presented) {
-      if (changed) {
-        renderer.present(); // single-TTM mode: no scheduler to present for us
-        frames++;
-      }
-      if (thread) {
-        hud.textContent = `${ttmSelect.value} — tag ${tagSelect.value} — frame ${frames}${thread.isDone ? " (done)" : ""}`;
-      } else if (scheduler) {
-        hud.textContent = `${adsSelect.value} — ${scheduler.runningCount} scene(s) — frame ${frames}${scheduler.isStopped ? " (stopped)" : ""}`;
-      }
+    if (changed) {
+      renderer.present(); // single-TTM mode: no scheduler to present for us
+      frames++;
+    }
+    // Repaint the HUD every tick, not only when a frame presented. Gating it on
+    // `changed || presented` left the text frozen at whatever the last displayed
+    // frame said — so a drained script kept advertising the scene count it had
+    // when it stopped drawing, which is exactly the state worth seeing.
+    if (thread) {
+      hud.textContent = `${ttmSelect.value} — tag ${tagSelect.value} — frame ${frames}${thread.isDone ? " (done)" : ""}`;
+    } else if (scheduler) {
+      hud.textContent = `${adsSelect.value} — ${scheduler.runningCount} scene(s) — frame ${frames}${scheduler.isStopped ? " (stopped)" : ""}`;
     }
     requestAnimationFrame(loop);
   }
