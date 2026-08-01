@@ -218,6 +218,15 @@ export class Canvas2DRenderer implements Renderer {
   private readonly buf: OffscreenCanvas;
   private readonly bufCtx: OffscreenCanvasRenderingContext2D;
   private background: ImageBitmap | null = null;
+  // Drawable background surface (the engine's grBackgroundSur). The island is
+  // BUILT onto this — raft, palm, shore waves — rather than being a fixed
+  // bitmap, and the wave animation keeps repainting it. Composited directly on
+  // top of `background`, below saved zones and thread layers. Null until
+  // backgroundLayer() is first called, so plain scene playback is unaffected.
+  private bgLayer: Canvas2DLayer | null = null;
+  // Always-on-top surface (the engine's holiday thread, composited after every
+  // scene thread). Holiday decorations must not be occluded by the scene.
+  private overlay: Canvas2DLayer | null = null;
   private layers: Canvas2DLayer[] = [];
   // Persistent "saved zones" layer (grSavedZonesLayer): scenery baked by
   // COPY_ZONE_TO_BG, composited above the background but below active layers.
@@ -239,6 +248,24 @@ export class Canvas2DRenderer implements Renderer {
 
   setBackground(img: ImageBitmap | null): void {
     this.background = img;
+  }
+
+  backgroundLayer(): Layer {
+    if (!this.bgLayer) this.bgLayer = new Canvas2DLayer();
+    return this.bgLayer;
+  }
+
+  clearBackgroundLayer(): void {
+    this.bgLayer = null;
+  }
+
+  overlayLayer(): Layer {
+    if (!this.overlay) this.overlay = new Canvas2DLayer();
+    return this.overlay;
+  }
+
+  clearOverlayLayer(): void {
+    this.overlay = null;
   }
 
   newLayer(): Layer {
@@ -303,12 +330,20 @@ export class Canvas2DRenderer implements Renderer {
     if (this.background) {
       b.drawImage(this.background, 0, 0);
     }
+    // The island (grBackgroundSur) paints over the ocean backdrop.
+    if (this.bgLayer) {
+      b.drawImage(this.bgLayer.canvas, 0, 0);
+    }
     // Saved zones sit above the background, below the active thread layers.
     if (this.savedZones) {
       b.drawImage(this.savedZones.canvas, 0, 0);
     }
     for (const layer of this.layers) {
       b.drawImage(layer.canvas, 0, 0);
+    }
+    // The holiday thread composites after every scene thread (WALKSTUF).
+    if (this.overlay) {
+      b.drawImage(this.overlay.canvas, 0, 0);
     }
     // Single atomic blit to the visible canvas.
     this.out.drawImage(this.buf, 0, 0);

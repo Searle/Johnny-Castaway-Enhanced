@@ -134,6 +134,14 @@ func extractAll(res *resources, ttmPalette [16][3]uint8, out string) {
 	adsIndex, adsSkipped := extractAllAds(res, out)
 	skipped = append(skipped, adsSkipped...)
 
+	// The island's own assets. These are loaded by ENGINE CODE (island.go), not
+	// by any TTM's LOAD_IMAGE/LOAD_SCREEN, so the TTM-driven pass above never
+	// sees them and the port had no way to draw a real island.
+	if err := extractIsland(res, ttmPalette, out); err != nil {
+		skipped = append(skipped, fmt.Sprintf("_ISLAND (%v)", err))
+		fmt.Fprintf(os.Stderr, "[tsextract] skip island: %v\n", err)
+	}
+
 	ij, err := json.MarshalIndent(struct {
 		TTMs    []indexEntry    `json:"ttms"`
 		ADS     []adsIndexEntry `json:"ads"`
@@ -144,6 +152,68 @@ func extractAll(res *resources, ttmPalette [16][3]uint8, out string) {
 
 	fmt.Printf("extracted %d/%d TTMs and %d ADS scripts (%d skipped) → %s/index.json\n",
 		len(index), len(names), len(adsIndex), len(skipped), out)
+}
+
+// islandBmps / islandScrs are the resources island.go loads directly:
+// BACKGRND.BMP holds the island, palm, shore waves and clouds; MRAFT.BMP the
+// five raft build stages; HOLIDAY.BMP the four seasonal decorations. The
+// backdrop is one of three ocean variants by day, or NIGHT.SCR after 18:00.
+var islandBmps = []string{"BACKGRND.BMP", "MRAFT.BMP", "HOLIDAY.BMP"}
+var islandScrs = []string{"OCEAN00.SCR", "OCEAN01.SCR", "OCEAN02.SCR", "NIGHT.SCR"}
+
+// extractIsland writes the island assets into <out>/_ISLAND/ with a manifest in
+// the same shape as a TTM's, so the browser can load it with the existing
+// loadAnimation() path. It is not a TTM and has no opcodes.
+func extractIsland(res *resources, ttmPalette [16][3]uint8, out string) error {
+	outDir := filepath.Join(out, "_ISLAND")
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		return err
+	}
+
+	palette := make([]string, 16)
+	for i, c := range ttmPalette {
+		palette[i] = fmt.Sprintf("#%02x%02x%02x", c[2], c[1], c[0])
+	}
+	manifest := Manifest{TTM: "_ISLAND", Palette: palette, Ops: []Op{}}
+
+	for _, sn := range islandScrs {
+		scr, ok := res.scrs[sn]
+		if !ok {
+			return fmt.Errorf("SCR %q not found", sn)
+		}
+		img := decodeScr(scr, ttmPalette)
+		file := strings.TrimSuffix(sn, ".SCR") + ".scr.png"
+		if err := writePNG(filepath.Join(outDir, file), img); err != nil {
+			return err
+		}
+		manifest.Screens = append(manifest.Screens, ManifestSheet{
+			Name:    sn,
+			Sprites: []ManifestSprite{{File: file, W: scr.width, H: scr.height}},
+		})
+	}
+
+	for _, bn := range islandBmps {
+		bmp, ok := res.bmps[bn]
+		if !ok {
+			return fmt.Errorf("BMP %q not found", bn)
+		}
+		sheet := decodeBmp(bmp, ttmPalette)
+		ms := ManifestSheet{Name: bn, Sprites: make([]ManifestSprite, len(sheet))}
+		for i, spr := range sheet {
+			file := fmt.Sprintf("%s.%d.png", strings.TrimSuffix(bn, ".BMP"), i)
+			if err := writePNG(filepath.Join(outDir, file), spr); err != nil {
+				return err
+			}
+			ms.Sprites[i] = ManifestSprite{File: file, W: spr.Bounds().Dx(), H: spr.Bounds().Dy()}
+		}
+		manifest.Sheets = append(manifest.Sheets, ms)
+	}
+
+	mf, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(outDir, "manifest.json"), mf, 0o644)
 }
 
 // adsIndexEntry catalogs one extracted ADS script for the browser.

@@ -373,6 +373,9 @@ export class TtmThread {
   // actually emitted, exactly as traceFrameEnd does.
   static traceMaxFrame = 0;
   static traceReachedBudget = false;
+  // Screensaver mode: the island owns the background surface, so scene
+  // LOAD_SCREENs must not replace it. See the LOAD_SCREEN case below.
+  static keepBackground = false;
 
   // execOne executes a single opcode, advancing ip. Returns true if it was
   // UPDATE (end of frame). Shared by runFrame and the prologue.
@@ -418,7 +421,14 @@ export class TtmThread {
         case Op.LOAD_SCREEN: {
           if (!this.suppressDraw) trace(`  LOADSCREEN ${raw.str ?? ""}`);
           const sheet = this.sheets.get((raw.str ?? "").toUpperCase());
-          this.renderer.setBackground(sheet?.frames[0] ?? null);
+          // Screensaver mode owns the backdrop: adsInitIsland has already drawn
+          // a real island (chosen ocean/night screen + island sprites) onto the
+          // background surface, and an island scene's own LOAD_SCREEN of
+          // ISLETEMP.SCR would paint the baked stand-in straight over it —
+          // undoing the tide, raft, position and night that the island encodes.
+          // The engine has no such conflict: there, grBackgroundSur IS the
+          // island, so a scene loading a screen is loading the island's own.
+          if (!TtmThread.keepBackground) this.renderer.setBackground(sheet?.frames[0] ?? null);
           // A new backdrop INVALIDATES baked scenery: grLoadScreen releases
           // grSavedZonesLayer before installing the new screen. Without this the
           // port kept compositing a zone baked against the OLD backdrop for the

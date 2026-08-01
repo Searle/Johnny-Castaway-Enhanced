@@ -3,7 +3,8 @@ import { Canvas2DRenderer } from "./render/canvas2d";
 import { TtmThread, setTraceSink } from "./ttm/interpreter";
 import { AdsScheduler, loadAds, setSchedSink } from "./ads/scheduler";
 import { positionForScene, sceneHasIsland } from "./ads/positioning";
-import { Story } from "./story/story";
+import { Story, STORY_DAYS } from "./story/story";
+import { Island, ISLAND_DIR, type IslandAssets } from "./story/island";
 import { Walk } from "./story/walk";
 import { SceneFlag, type StoryScene } from "./story/data";
 import type { Layer } from "./render/renderer";
@@ -11,6 +12,9 @@ import type { LoadedSheet } from "./manifest";
 
 // One TTM "tick" is ~33ms in the original (the ADS loop's per-tick sleep).
 const TICK_MS = 20; // one engine time-unit = 20ms (grUpdateDisplay: delay * 0.02s)
+// The background(waves) and clouds threads both run on an 8-tick delay
+// (islandInit sets 8, overriding the 40 above it; clouds are 8).
+const ISLAND_TICK = 8;
 const ANIM_ROOT = `${import.meta.env.BASE_URL}anim`;
 
 const $ = (id: string) => document.getElementById(id)!;
@@ -24,6 +28,13 @@ const tagSelect = $("tag") as HTMLSelectElement;
 const adsSelect = $("ads") as HTMLSelectElement;
 const adsTagSelect = $("adsTag") as HTMLSelectElement;
 const restartBtn = $("restart") as HTMLButtonElement;
+const storyControls = $("storyControls") as HTMLElement;
+const storyDaySelect = $("storyDay") as HTMLSelectElement;
+const storyTideSelect = $("storyTide") as HTMLSelectElement;
+const storySkySelect = $("storySky") as HTMLSelectElement;
+const storyHolidaySelect = $("storyHoliday") as HTMLSelectElement;
+const storyPosSelect = $("storyPos") as HTMLSelectElement;
+const storyNextBtn = $("storyNext") as HTMLButtonElement;
 
 const renderer = new Canvas2DRenderer(canvas);
 
@@ -50,6 +61,15 @@ let story: {
   // scheduler is still attached and still drained — without this the render
   // loop would call advanceStory again on the very next frame and eat a scene.
   advancing: boolean;
+  // The island for the CURRENT episode, plus its animation layers. Rebuilt when
+  // a FINAL scene ends the episode (adsReleaseIsland → adsInitIsland).
+  island: Island | null;
+  cloudLayer: Layer | null;
+  // (holiday lives on the renderer overlay, not a story-owned layer)
+  // Wave/cloud metronomes. Both run on an 8-tick delay in the engine, and they
+  // are what quantizes the scheduler — see the metronome note in the scheduler.
+  waveTimer: number;
+  cloudTimer: number;
 } | null = null;
 // Module-level copy of the ADS index so story mode can resolve scene names
 // outside main()'s scope. Set once, at startup.
@@ -69,7 +89,19 @@ function stopPlayback(keepStory = false) {
   scheduler = null;
   if (!keepStory) story = null;
   renderer.resetLayers();
-  if (!keepStory) renderer.setBackground(null);
+  if (keepStory && story) {
+    // resetLayers() just dropped the island's cloud/holiday layers along with
+    // the scene's. Recreate them first, so they sit UNDER the scene layers the
+    // next beat is about to add (newLayer stacks on top).
+    story.cloudLayer = story.island && story.island.cloudCount > 0 ? renderer.newLayer() : null;
+  }
+  if (!keepStory) {
+    renderer.setBackground(null);
+    renderer.clearBackgroundLayer();
+    renderer.clearOverlayLayer();
+    // Leaving story mode hands the backdrop back to the TTM interpreter.
+    TtmThread.keepBackground = false;
+  }
   // Cleared here (start of every load) so the harness never observes a stale
   // ready flag from a previous scene while the new one is still loading.
   (window as unknown as { __ready?: boolean }).__ready = false;
@@ -143,7 +175,16 @@ async function loadStoryScene(scene: StoryScene): Promise<void> {
     const { ads, slots } = await loadAds(ANIM_ROOT, entry.dir);
     if (token !== loadToken) return;
     scheduler = new AdsScheduler(ads, slots, renderer, {
-      position: (slot, tag) => positionForScene(entry.name, slot, tag),
+      // With a REAL island we can finally honour the engine's positioning:
+      // ttmDx = islandState.xPos + (LEFT_ISLAND ? 272 : 0), the same offset the
+      // island itself was drawn at, so sprites stay on it wherever it landed.
+      // (The old static-backdrop port had to pin this to 0 — see positioning.ts.)
+      position: () => {
+        if (!story?.island) return positionForScene(entry.name, 0, 0);
+        const st = story.driver.island;
+        const xOffset = (scene.flags & SceneFlag.LEFT_ISLAND) !== 0 ? 272 : 0;
+        return { dx: st.xPos + xOffset, dy: st.yPos };
+      },
       island: sceneHasIsland(entry.name, scene.adsTag),
       adsName: entry.name,
     });
@@ -154,6 +195,111 @@ async function loadStoryScene(scene: StoryScene): Promise<void> {
   } catch (err) {
     if (token === loadToken) hud.textContent = `error: ${(err as Error).message}`;
     console.error(err);
+  }
+}
+
+// ---- island ----
+
+// Test overrides from the story controls. The island's real state comes from
+// the calendar and the scene's flags, which makes tide/night/holiday/position
+// hard to see on demand — Christmas is three days a year. These pin a value so
+// each configuration can actually be looked at. "auto" leaves the engine's own
+// choice alone; nothing here changes scene SELECTION, only how the island
+// renders, so the story logic under test stays the real one.
+const storyOverrides: {
+  day: number | null;
+  tide: "auto" | "high" | "low";
+  sky: "auto" | "day" | "night";
+  holiday: number | null;
+  centered: boolean;
+} = { day: null, tide: "auto", sky: "auto", holiday: null, centered: false };
+
+// Apply the overrides to the island state the driver just computed.
+function applyIslandOverrides(): void {
+  if (!story) return;
+  const st = story.driver.island;
+  if (storyOverrides.tide !== "auto") st.lowTide = storyOverrides.tide === "low";
+  if (storyOverrides.sky !== "auto") st.night = storyOverrides.sky === "night";
+  if (storyOverrides.holiday !== null) st.holiday = storyOverrides.holiday;
+  if (storyOverrides.centered) {
+    st.xPos = 0;
+    st.yPos = 0;
+  }
+}
+
+let islandAssets: IslandAssets | null = null;
+
+async function ensureIslandAssets(): Promise<IslandAssets | null> {
+  if (islandAssets) return islandAssets;
+  try {
+    const { manifest, sheets } = await loadAnimation(`${ANIM_ROOT}/${ISLAND_DIR}`);
+    const backgrnd = sheets.get("BACKGRND.BMP");
+    const raft = sheets.get("MRAFT.BMP");
+    const holiday = sheets.get("HOLIDAY.BMP");
+    if (!backgrnd || !raft || !holiday) throw new Error("island sheets missing");
+    // Screens come back in the same map, keyed by SCR name.
+    const screens = new Map<string, ImageBitmap>();
+    for (const s of manifest.screens ?? []) {
+      const img = sheets.get(s.name)?.frames[0];
+      if (img) screens.set(s.name, img);
+    }
+    islandAssets = { backgrnd, raft, holiday, screens };
+  } catch (err) {
+    console.error("island assets unavailable — falling back to the baked backdrop", err);
+    islandAssets = null;
+  }
+  return islandAssets;
+}
+
+// Build the island for a new episode: pick the backdrop, paint the island onto
+// the background surface, and seed the clouds. Mirrors adsInitIsland().
+async function buildIsland(): Promise<void> {
+  if (!story) return;
+  const assets = await ensureIslandAssets();
+  if (!assets) return;
+  const island = new Island(assets, Math.random);
+  const st = story.driver.island;
+
+  renderer.clearBackgroundLayer();
+  renderer.setBackground(island.backdropFor(st));
+  island.build(st, renderer.backgroundLayer());
+  island.initClouds();
+
+  story.island = island;
+  // From here on the island owns the backdrop; scene LOAD_SCREENs must not
+  // paint the baked ISLETEMP stand-in over it.
+  TtmThread.keepBackground = true;
+  // Create the cloud layer NOW, while no scene layer exists. newLayer() stacks
+  // above everything present, so a lazily-created cloud layer would end up
+  // drawing OVER Johnny. Clouds belong between the island and the scene, which
+  // is exactly what creating it first gives us. (The engine gets this from its
+  // fixed thread order: background, clouds, then scene threads.)
+  story.cloudLayer = island.cloudCount > 0 ? renderer.newLayer() : null;
+  // Holiday decorations go on the always-on-top overlay: the engine runs them
+  // as their own thread composited after every scene thread, so the Christmas
+  // tree is never hidden behind Johnny.
+  renderer.clearOverlayLayer();
+  island.drawHoliday(st, renderer.overlayLayer());
+  story.waveTimer = 0;
+  story.cloudTimer = 0;
+}
+
+// Tick the island's own animation threads. They run independently of whatever
+// scene or walk is playing, which is why the shore keeps moving during a hold.
+function animateIsland(cost: number): void {
+  if (!story?.island) return;
+  const st = story.driver.island;
+
+  story.waveTimer -= cost;
+  if (story.waveTimer <= 0) {
+    story.waveTimer = ISLAND_TICK;
+    story.island.animateWaves(st, renderer.backgroundLayer());
+  }
+
+  story.cloudTimer -= cost;
+  if (story.cloudTimer <= 0) {
+    story.cloudTimer = ISLAND_TICK;
+    if (story.cloudLayer) story.island.animateClouds(story.cloudLayer);
   }
 }
 
@@ -190,6 +336,13 @@ async function startWalk(to: StoryScene): Promise<boolean> {
 
   stopPlayback(true); // drop the finished scene's layer, keep the story driver
   const layer = renderer.newLayer();
+  // adsPlayWalk sets grDx/grDy to the DESTINATION scene's offset before walking,
+  // so a walk toward a LEFT_ISLAND scene renders on the right half of the island.
+  if (story.island) {
+    const st = story.driver.island;
+    const xOffset = (to.flags & SceneFlag.LEFT_ISLAND) !== 0 ? 272 : 0;
+    layer.setOrigin(st.xPos + xOffset, st.yPos);
+  }
   story.walk = { w: new Walk(from, fromHdg, to.spotStart, to.hdgStart, Math.random), layer };
   frames = 0;
   (window as unknown as { __ready?: boolean }).__ready = true;
@@ -207,12 +360,11 @@ function stepWalk(): number | null {
   layer.clear();
   const img = walkSheet.frames[f.spriteNo];
   if (img) layer.drawSprite(img, f.x, f.y, f.flip);
-  // behindTree: the engine redraws the palm over Johnny as he passes behind it
-  // (grDrawSprite of the trunk + leaves from the island background slot). The
-  // static backdrop already contains the palm, but it sits BELOW this layer, so
-  // without the real island sprite slots we cannot occlude him here. Left as-is
-  // rather than faked — see the island note in INSIGHTS.md.
-  renderer.present();
+  // Walking behind the palm: redraw trunk + leaves ON TOP of Johnny, exactly as
+  // walkAnimate does. Now possible because the island owns the real sprites.
+  if (f.behindTree && story.island) story.island.drawPalmOver(layer);
+  // The caller presents (after ticking the island), so the shore and clouds
+  // animate during walks too.
   frames++;
   return f.delay;
 }
@@ -221,13 +373,20 @@ function stepWalk(): number | null {
 // Walks first (if there is somewhere to walk from), then plays the scene.
 function advanceStory(): void {
   if (!story || story.advancing) return;
-  if (story.queue.length === 0) story.queue = story.driver.buildEpisode();
+  // A fresh episode re-rolls the island (tide, raft, position, holiday), so it
+  // has to be rebuilt — adsReleaseIsland + adsInitIsland around storyPlay's loop.
+  const newEpisode = story.queue.length === 0;
+  if (newEpisode) {
+    story.queue = story.driver.buildEpisode();
+    applyIslandOverrides();
+  }
   const next = story.queue.shift() ?? null;
   story.current = next;
   if (!next) return;
   story.advancing = true;
   void (async () => {
     try {
+      if (newEpisode) await buildIsland();
       // A walk, if there is one, hands off to the scene when it finishes.
       if (await startWalk(next)) return;
       await loadStoryScene(next);
@@ -253,32 +412,51 @@ function finishWalk(): void {
 
 function startStory(): void {
   stopPlayback();
+  renderer.clearOverlayLayer();
+  const driver = new Story({
+    loadProgress: () => {
+      // A pinned day short-circuits persistence: report it as already-current
+      // so updateCurrentDay() doesn't advance past it on the next episode.
+      if (storyOverrides.day !== null) {
+        return { day: storyOverrides.day, dayOfYear: dayOfYearNow() };
+      }
+      try {
+        const raw = localStorage.getItem(STORY_KEY);
+        return raw ? (JSON.parse(raw) as { day: number; dayOfYear: number }) : null;
+      } catch {
+        return null; // private mode / disabled storage: just start at day 1
+      }
+    },
+    saveProgress: (p) => {
+      if (storyOverrides.day !== null) return; // don't persist a test pin
+      try {
+        localStorage.setItem(STORY_KEY, JSON.stringify(p));
+      } catch {
+        /* non-fatal */
+      }
+    },
+  });
   story = {
-    driver: new Story({
-      loadProgress: () => {
-        try {
-          const raw = localStorage.getItem(STORY_KEY);
-          return raw ? (JSON.parse(raw) as { day: number; dayOfYear: number }) : null;
-        } catch {
-          return null; // private mode / disabled storage: just start at day 1
-        }
-      },
-      saveProgress: (p) => {
-        try {
-          localStorage.setItem(STORY_KEY, JSON.stringify(p));
-        } catch {
-          /* non-fatal */
-        }
-      },
-    }),
+    driver,
     queue: [],
     current: null,
     prevSpot: null,
     prevHdg: 0,
     walk: null,
     advancing: false,
+    island: null,
+    cloudLayer: null,
+    waveTimer: 0,
+    cloudTimer: 0,
   };
   advanceStory();
+}
+
+function dayOfYearNow(): number {
+  const d = new Date();
+  const start = Date.UTC(d.getFullYear(), 0, 0);
+  const now = Date.UTC(d.getFullYear(), d.getMonth(), d.getDate());
+  return Math.floor((now - start) / 86_400_000);
 }
 
 // ---- dropdown population ----
@@ -340,7 +518,58 @@ async function main() {
     // Story mode picks its own scenes, so neither picker applies.
     adsControls.hidden = mode !== "ads";
     ttmControls.hidden = mode !== "ttm";
+    storyControls.hidden = mode !== "story";
   }
+
+  // Story day picker: 1..11, plus "auto" for the persisted calendar day.
+  {
+    const auto = document.createElement("option");
+    auto.value = "auto";
+    auto.textContent = "auto";
+    storyDaySelect.append(auto);
+    for (let d = 1; d <= STORY_DAYS; d++) {
+      const o = document.createElement("option");
+      o.value = String(d);
+      o.textContent = String(d);
+      storyDaySelect.append(o);
+    }
+  }
+
+  // Changing any override restarts the story so a fresh episode picks it up —
+  // island state is decided once per episode, not per scene.
+  const restartStory = () => {
+    if (modeSelect.value === "story") startStory();
+  };
+  storyDaySelect.addEventListener("change", () => {
+    storyOverrides.day = storyDaySelect.value === "auto" ? null : Number(storyDaySelect.value);
+    restartStory();
+  });
+  storyTideSelect.addEventListener("change", () => {
+    storyOverrides.tide = storyTideSelect.value as "auto" | "high" | "low";
+    restartStory();
+  });
+  storySkySelect.addEventListener("change", () => {
+    storyOverrides.sky = storySkySelect.value as "auto" | "day" | "night";
+    restartStory();
+  });
+  storyHolidaySelect.addEventListener("change", () => {
+    storyOverrides.holiday =
+      storyHolidaySelect.value === "auto" ? null : Number(storyHolidaySelect.value);
+    restartStory();
+  });
+  storyPosSelect.addEventListener("change", () => {
+    storyOverrides.centered = storyPosSelect.value === "0";
+    restartStory();
+  });
+  // Skip the current beat without waiting out its PURGE-loop timer — idle
+  // STAND poses legitimately hold for tens of seconds, which makes eyeballing
+  // a sequence of scenes painful.
+  storyNextBtn.addEventListener("click", () => {
+    if (!story) return;
+    story.walk = null;
+    story.advancing = false;
+    advanceStory();
+  });
 
   function reloadCurrent() {
     if (modeSelect.value === "story") {
@@ -575,6 +804,10 @@ async function main() {
     let changed = false;
     let budget = 10;
     while (acc >= TICK_MS && budget-- > 0) {
+      // Engine time consumed by this iteration, charged to the island's wave
+      // and cloud metronomes so they keep running through scenes, walks and
+      // long holds alike (they are separate threads in the engine).
+      let tickCost = 1;
       if (thread) {
         acc -= TICK_MS;
         if (thread.tick()) changed = true;
@@ -587,14 +820,25 @@ async function main() {
           finishWalk();
           break;
         }
-        acc -= TICK_MS * Math.max(1, cost);
+        tickCost = Math.max(1, cost);
+        acc -= TICK_MS * tickCost;
+        animateIsland(tickCost);
+        // The walk redraws its own layer each frame; present after the island
+        // has updated so the shore and clouds move during the walk too.
+        renderer.present();
       } else if (scheduler) {
         scheduler.tick(); // presents via onPresent
         // One scheduler tick advances the engine clock by `mini` time-units
         // (ads.go then sleeps mini * 20ms), NOT by one. Charge the real cost or
         // playback runs `mini`× too fast — with clouds running, mini is usually
         // 8, i.e. ~8× speed. The trace harness is unaffected: it steps by frame.
-        acc -= TICK_MS * scheduler.lastTickCost;
+        tickCost = scheduler.lastTickCost;
+        acc -= TICK_MS * tickCost;
+        // The island's own threads run alongside the scene's. onPresent has
+        // already composited this iteration, so update the island first and let
+        // the next present pick it up — the shore keeps moving during the long
+        // PURGE-loop holds that dominate idle scenes.
+        animateIsland(tickCost);
         // The script ran dry: re-enter the entry tag, exactly as the engine's
         // `for !shouldExitApp { adsPlay(...) }` does (main.go) — adsPlay returns
         // as soon as no thread is left running, and some tags legitimately run

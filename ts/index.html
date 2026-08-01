@@ -77,6 +77,42 @@
             <select id="adsTag"></select>
           </label>
         </span>
+        <span id="storyControls" hidden>
+          <label>day
+            <select id="storyDay"></select>
+          </label>
+          <label>tide
+            <select id="storyTide">
+              <option value="auto">auto</option>
+              <option value="high">high</option>
+              <option value="low">low</option>
+            </select>
+          </label>
+          <label>sky
+            <select id="storySky">
+              <option value="auto">auto</option>
+              <option value="day">day</option>
+              <option value="night">night</option>
+            </select>
+          </label>
+          <label>holiday
+            <select id="storyHoliday">
+              <option value="auto">auto</option>
+              <option value="0">none</option>
+              <option value="1">halloween</option>
+              <option value="2">st patrick</option>
+              <option value="3">christmas</option>
+              <option value="4">new year</option>
+            </select>
+          </label>
+          <label>pos
+            <select id="storyPos">
+              <option value="auto">auto</option>
+              <option value="0">centered</option>
+            </select>
+          </label>
+          <button id="storyNext" title="Skip to the next scene">⏭ next</button>
+        </span>
         <button id="restart" title="Replay from the start">↻ restart</button>
       </div>
       <canvas id="screen" width="640" height="480"></canvas>

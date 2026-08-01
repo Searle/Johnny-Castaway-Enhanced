@@ -48,6 +48,22 @@ export interface Renderer {
   // background persists across CLEAR_SCREEN and layer changes.
   setBackground(img: ImageBitmap | null): void;
 
+  // The drawable background surface (grBackgroundSur), created on first use.
+  // The island is BUILT onto this — raft, palm, animated shore — instead of
+  // being a fixed backdrop bitmap, so tide, raft stage and position are real.
+  // It composites directly above setBackground()'s image and below everything
+  // else, and deliberately survives resetLayers(): the island outlives the
+  // scenes drawn on top of it, exactly as it does in the engine.
+  backgroundLayer(): Layer;
+
+  // Drop the background surface (adsReleaseIsland — end of an episode).
+  clearBackgroundLayer(): void;
+
+  // Always-on-top surface, composited after every thread layer — the engine's
+  // holiday thread. Survives resetLayers() like the background surface does.
+  overlayLayer(): Layer;
+  clearOverlayLayer(): void;
+
   // Create a fresh transparent layer stacked above all existing layers.
   newLayer(): Layer;
 
