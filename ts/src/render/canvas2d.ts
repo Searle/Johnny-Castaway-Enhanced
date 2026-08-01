@@ -80,14 +80,57 @@ class Canvas2DLayer implements Layer {
   }
 
   drawLine(x1: number, y1: number, x2: number, y2: number, color: string): void {
+    // Axis-aligned 1px lines are drawn as a fillRect, not a stroke. Canvas
+    // antialiases stroke ENDPOINTS even on a perfectly vertical/horizontal path
+    // — the engine (GL_LINES) does not — which left half-intensity pixels at
+    // each end of the fishing line (FISHING:5 differed from the oracle by
+    // exactly 2 px: one 106 = 212/2, one alpha=127). fillRect is exact.
+    const ax = x1 + this.dx,
+      ay = y1 + this.dy,
+      bx = x2 + this.dx,
+      by = y2 + this.dy;
     this.withClip((ctx) => {
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      // +0.5 to hit pixel centers so 1px lines don't blur across two rows.
-      ctx.moveTo(x1 + this.dx + 0.5, y1 + this.dy + 0.5);
-      ctx.lineTo(x2 + this.dx + 0.5, y2 + this.dy + 0.5);
-      ctx.stroke();
+      if (ax === bx || ay === by) {
+        // The span EXCLUDES the far endpoint: GL_LINES (rl.DrawLineV, what the
+        // engine uses) is a half-open primitive, so `LINE 611,246-611,293`
+        // covers rows 246..292. Using |delta|+1 painted row 293 too and left a
+        // single stray pixel past the end of the fishing line.
+        ctx.fillStyle = color;
+        const x = Math.min(ax, bx),
+          y = Math.min(ay, by);
+        const w = Math.abs(bx - ax),
+          h = Math.abs(by - ay);
+        ctx.fillRect(x, y, w === 0 ? 1 : w, h === 0 ? 1 : h);
+        return;
+      }
+      // Diagonals are rasterized with Bresenham, one exact pixel at a time,
+      // rather than stroked. A Canvas stroke ANTIALIASES a diagonal — partial
+      // coverage on both sides of the ideal line — while the engine's GL_LINES
+      // picks a single hard pixel per step. Stroking left ~340 fractional-alpha
+      // pixels along the fishing line in FISHING:4/7/8 (alphas like 83/126/171
+      // where the oracle has either 0 or 255). Same half-open convention as the
+      // axis-aligned case above: the far endpoint is excluded.
+      ctx.fillStyle = color;
+      let x = ax,
+        y = ay;
+      const dx = Math.abs(bx - ax),
+        dy = -Math.abs(by - ay);
+      const sx = ax < bx ? 1 : -1,
+        sy = ay < by ? 1 : -1;
+      let err = dx + dy;
+      for (;;) {
+        if (x === bx && y === by) break; // half-open: stop before the endpoint
+        ctx.fillRect(x, y, 1, 1);
+        const e2 = 2 * err;
+        if (e2 >= dy) {
+          err += dy;
+          x += sx;
+        }
+        if (e2 <= dx) {
+          err += dx;
+          y += sy;
+        }
+      }
     });
   }
 

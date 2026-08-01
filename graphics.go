@@ -1771,7 +1771,23 @@ func grDrawLine(sur *rl.RenderTexture2D, x1, y1, x2, y2 int16, colorIdx uint8) {
 		defer rl.EndScissorMode()
 	}
 
-	rl.DrawLine(int32(x1), int32(y1), int32(x2), int32(y2), c)
+	// Draw through pixel CENTRES (+0.5), not pixel corners.
+	//
+	// rl.DrawLine rasterizes via GL_LINES, which samples on the integer lattice
+	// — the corner between pixels — so an axis-aligned 1px line at x lands in
+	// column x-1. The scripts mean "the pixel column x": MARY.ADS tag 2 asks for
+	// `LINE 611,246-611,293` (the fishing line) and the engine drew it at 610;
+	// FISHING.ADS tag 4 asks for x=339 and got 338. Offsetting to the pixel
+	// centre puts it where the script says, and matches what a Canvas2D stroke
+	// does with the same +0.5 convention.
+	//
+	// Uses the float variant so the offset survives; DrawLine's int32 signature
+	// would truncate it straight back to the corner.
+	rl.DrawLineV(
+		rl.Vector2{X: float32(x1) + 0.5, Y: float32(y1) + 0.5},
+		rl.Vector2{X: float32(x2) + 0.5, Y: float32(y2) + 0.5},
+		c,
+	)
 }
 
 func grDrawHorizontalLine(sur *rl.RenderTexture2D, x1, x2, y int16, color uint8) {
