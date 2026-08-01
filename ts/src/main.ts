@@ -3,6 +3,8 @@ import { Canvas2DRenderer } from "./render/canvas2d";
 import { TtmThread, setTraceSink } from "./ttm/interpreter";
 import { AdsScheduler, loadAds, setSchedSink } from "./ads/scheduler";
 import { positionForScene, sceneHasIsland } from "./ads/positioning";
+import { Story } from "./story/story";
+import type { StoryScene } from "./story/data";
 
 // One TTM "tick" is ~33ms in the original (the ADS loop's per-tick sleep).
 const TICK_MS = 20; // one engine time-unit = 20ms (grUpdateDisplay: delay * 0.02s)
@@ -28,9 +30,20 @@ let scheduler: AdsScheduler | null = null;
 let frames = 0;
 let loadToken = 0;
 
-function stopPlayback() {
+// Screensaver mode: non-null while the story driver owns playback. It queues
+// scenes and advances when the running one drains; see advanceStory().
+let story: { driver: Story; queue: StoryScene[]; current: StoryScene | null } | null = null;
+// Module-level copy of the ADS index so story mode can resolve scene names
+// outside main()'s scope. Set once, at startup.
+let adsIndex: AdsIndexEntry[] = [];
+
+// keepStory: story mode calls this between its own scenes, where the story
+// driver must survive even though the scheduler is being torn down. Every other
+// caller is switching away from playback entirely and wants it cleared.
+function stopPlayback(keepStory = false) {
   thread = null;
   scheduler = null;
+  if (!keepStory) story = null;
   renderer.resetLayers();
   renderer.setBackground(null);
   // Cleared here (start of every load) so the harness never observes a stale
@@ -87,6 +100,73 @@ async function loadAdsScript(entry: AdsIndexEntry, entryTag: number) {
   }
 }
 
+// ---- screensaver (story) mode ----
+
+const STORY_KEY = "jc.story.progress";
+
+// Play one story scene. Unlike the ADS viewer this does NOT loop on drain —
+// draining is precisely the signal that the beat is over and the next one
+// should start (advanceStory below).
+async function loadStoryScene(scene: StoryScene): Promise<void> {
+  const token = ++loadToken;
+  const entry = (adsIndex ?? []).find((a) => a.name === scene.adsName);
+  if (!entry) {
+    hud.textContent = `story: missing ${scene.adsName}`;
+    return;
+  }
+  stopPlayback(true); // tear down the previous scene, keep the story driver
+  try {
+    const { ads, slots } = await loadAds(ANIM_ROOT, entry.dir);
+    if (token !== loadToken) return;
+    scheduler = new AdsScheduler(ads, slots, renderer, {
+      position: (slot, tag) => positionForScene(entry.name, slot, tag),
+      island: sceneHasIsland(entry.name, scene.adsTag),
+      adsName: entry.name,
+    });
+    scheduler.start(scene.adsTag);
+    frames = 0;
+    renderer.present();
+    (window as unknown as { __ready?: boolean }).__ready = true;
+  } catch (err) {
+    if (token === loadToken) hud.textContent = `error: ${(err as Error).message}`;
+    console.error(err);
+  }
+}
+
+// Pull the next scene, building a fresh episode when the current one is spent.
+function advanceStory(): void {
+  if (!story) return;
+  if (story.queue.length === 0) story.queue = story.driver.buildEpisode();
+  story.current = story.queue.shift() ?? null;
+  if (story.current) void loadStoryScene(story.current);
+}
+
+function startStory(): void {
+  stopPlayback();
+  story = {
+    driver: new Story({
+      loadProgress: () => {
+        try {
+          const raw = localStorage.getItem(STORY_KEY);
+          return raw ? (JSON.parse(raw) as { day: number; dayOfYear: number }) : null;
+        } catch {
+          return null; // private mode / disabled storage: just start at day 1
+        }
+      },
+      saveProgress: (p) => {
+        try {
+          localStorage.setItem(STORY_KEY, JSON.stringify(p));
+        } catch {
+          /* non-fatal */
+        }
+      },
+    }),
+    queue: [],
+    current: null,
+  };
+  advanceStory();
+}
+
 // ---- dropdown population ----
 
 function fillTags(entry: IndexEntry, preferred?: number) {
@@ -118,6 +198,7 @@ function fillAdsTags(entry: AdsIndexEntry, preferred?: number) {
 async function main() {
   const index: AnimIndex = await loadIndex(ANIM_ROOT);
   if (!index.ttms.length) throw new Error("no animations — run `npm run extract -- -all`");
+  adsIndex = index.ads ?? [];
 
   for (const t of index.ttms) {
     const opt = document.createElement("option");
@@ -142,13 +223,15 @@ async function main() {
   const wantTag = params.get("tag") != null ? Number(params.get("tag")) : undefined;
 
   function applyMode(mode: string) {
-    const ads = mode === "ads";
-    adsControls.hidden = !ads;
-    ttmControls.hidden = ads;
+    // Story mode picks its own scenes, so neither picker applies.
+    adsControls.hidden = mode !== "ads";
+    ttmControls.hidden = mode !== "ttm";
   }
 
   function reloadCurrent() {
-    if (modeSelect.value === "ads") {
+    if (modeSelect.value === "story") {
+      startStory();
+    } else if (modeSelect.value === "ads") {
       const e = adsEntry();
       if (e) void loadAdsScript(e, Number(adsTagSelect.value));
     } else {
@@ -156,7 +239,9 @@ async function main() {
     }
   }
 
-  if (wantAds && (index.ads ?? []).some((a) => a.name === wantAds.toUpperCase())) {
+  if (params.get("story") != null) {
+    modeSelect.value = "story";
+  } else if (wantAds && (index.ads ?? []).some((a) => a.name === wantAds.toUpperCase())) {
     modeSelect.value = "ads";
     adsSelect.value = wantAds.toUpperCase();
   } else if (wantAnim && index.ttms.some((t) => t.name === wantAnim.toUpperCase())) {
@@ -396,7 +481,17 @@ async function main() {
         //
         // Guard against a tag that emits NOTHING per pass, which would restart
         // every iteration and spin — the same check the trace path uses.
-        if (scheduler.isDrained && !scheduler.isStopped) {
+        if (scheduler.isDrained) {
+          // Story mode: a drained script means this story beat is over, so move
+          // to the next scene rather than replaying this one. `isStopped` is not
+          // required here — a beat that ends via END is just as finished as one
+          // that runs dry, and both should advance.
+          if (story) {
+            if (frames === 0) break; // nothing played yet: let it start before advancing
+            advanceStory();
+            break;
+          }
+          if (scheduler.isStopped) break;
           if (frames === framesAtPassStart) break;
           framesAtPassStart = frames;
           scheduler.restart();
@@ -415,6 +510,13 @@ async function main() {
     // when it stopped drawing, which is exactly the state worth seeing.
     if (thread) {
       hud.textContent = `${ttmSelect.value} — tag ${tagSelect.value} — frame ${frames}${thread.isDone ? " (done)" : ""}`;
+    } else if (story) {
+      const s = story.current;
+      const day = story.driver.currentDay;
+      const left = story.queue.length;
+      hud.textContent = s
+        ? `screensaver — day ${day} — ${s.adsName} tag ${s.adsTag} — ${left} scene(s) left — frame ${frames}`
+        : `screensaver — day ${day} — starting…`;
     } else if (scheduler) {
       hud.textContent = `${adsSelect.value} — ${scheduler.runningCount} scene(s) — frame ${frames}${scheduler.isStopped ? " (stopped)" : ""}`;
     }
