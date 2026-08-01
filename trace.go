@@ -143,6 +143,17 @@ func traceFrameStart() {
 }
 
 // traceDraw logs a DRAW_SPRITE / DRAW_SPRITE_FLIP.
+//
+// traceResolve (JC_TRACE_RESOLVE=1) additionally logs the RESOLVED sheet name
+// and cel size for the (imageNo, spriteNo) pair. `img=N` is a BMP SLOT index
+// whose meaning is runtime state — which sheet is in that slot depends on every
+// LOAD_IMAGE executed so far — so a bare slot number cannot be mapped to a
+// sprite by reading data files. Guessing that mapping by eye is what sent three
+// separate attempts at the 1px-edge bug chasing the wrong cel. With this on,
+// the mapping is OBSERVED, and any disagreement between the engines about which
+// sheet or what size is itself caught by the normal sweep.
+var traceResolve = os.Getenv("JC_TRACE_RESOLVE") != ""
+
 func traceDraw(x, y int16, spriteNo, imageNo uint16, flip bool) {
 	if !traceEnabled {
 		return
@@ -152,6 +163,26 @@ func traceDraw(x, y int16, spriteNo, imageNo uint16, flip bool) {
 		f = 1
 	}
 	fmt.Fprintf(traceOut, "  DRAW s=%d img=%d @%d,%d flip=%d\n", spriteNo, imageNo, x, y, f)
+}
+
+// traceDrawResolved logs the sheet/size behind a draw, when JC_TRACE_RESOLVE is
+// set. Kept separate from traceDraw so the default trace format — which the
+// oracle diff compares byte-for-byte — is untouched.
+func traceDrawResolved(slot *TTtmSlot, spriteNo, imageNo uint16) {
+	if !traceEnabled || !traceResolve || slot == nil {
+		return
+	}
+	name := "?"
+	if int(imageNo) < len(slot.slotBmpNames) {
+		name = slot.slotBmpNames[imageNo]
+	}
+	w, h := 0, 0
+	if int(imageNo) < len(slot.sprites) && int(spriteNo) < len(slot.sprites[imageNo]) {
+		if tex := slot.sprites[imageNo][spriteNo]; tex != nil {
+			w, h = int(tex.Width), int(tex.Height)
+		}
+	}
+	fmt.Fprintf(traceOut, "    RESOLVED %s#%d %dx%d\n", name, spriteNo, w, h)
 }
 
 // traceOp logs a non-draw opcode of interest (DELAY, GOTO, PURGE, CLEAR, etc.).

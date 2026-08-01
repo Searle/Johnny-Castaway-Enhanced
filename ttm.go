@@ -377,12 +377,14 @@ func ttmPlay(ttmThread *TTtmThread) {
 		case 0xA504:
 			debugPrintf("\tDRAW_SPRITE x:%d y:%d sprtNo:%d imgNo:%d\n", args[0], args[1], args[2], args[3])
 			traceDraw(int16(args[0]), int16(args[1]), args[2], args[3], false)
+			traceDrawResolved(ttmThread.ttmSlot, args[2], args[3])
 			trackThreadMovement(ttmThread, int16(args[0]), int16(args[1]))
 			trackLastDraw(ttmThread, int16(args[0]), int16(args[1]), args[2], args[3], false)
 			grDrawSprite(ttmThread.ttmLayer, ttmThread.ttmSlot, int16(args[0]), int16(args[1]), args[2], args[3])
 		case 0xA524:
 			debugPrintf("\tDRAW_SPRITE_FLIP x:%d y:%d sprtNo:%d imgNo:%d\n", args[0], args[1], args[2], args[3])
 			traceDraw(int16(args[0]), int16(args[1]), args[2], args[3], true)
+			traceDrawResolved(ttmThread.ttmSlot, args[2], args[3])
 			trackThreadMovement(ttmThread, int16(args[0]), int16(args[1]))
 			trackLastDraw(ttmThread, int16(args[0]), int16(args[1]), args[2], args[3], true)
 			grDrawSpriteFlip(ttmThread.ttmLayer, ttmThread.ttmSlot, int16(args[0]), int16(args[1]), args[2], args[3])
