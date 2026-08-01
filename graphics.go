@@ -1328,8 +1328,21 @@ func grSetClipZone(sur *rl.RenderTexture2D, x1, y1, x2, y2 int16) {
 		}
 	}
 
-	w := x2 - x1
-	h := y2 - y1
+	// INCLUSIVE corners: the TTM args are (x1,y1)-(x2,y2) as top-left and
+	// BOTTOM-RIGHT pixels, both inside the zone, so the span is x2-x1+1 columns.
+	// This function's own full-screen-reset test agrees — it treats x2 >= 639 as
+	// "reaches the last column" (screenWidth-1), which is only meaningful if x2
+	// is inclusive.
+	//
+	// It previously computed x2-x1, clipping one column and one row short. That
+	// is invisible in normal play (the missing pixels are at the very edge of a
+	// zone the artist sized generously) but it made the engine disagree with the
+	// ts/ port on exactly one column and one row: MJFISH.TTM's clip
+	// (370,203)-(457,292) became 87x89 here versus the port's correct 88x90, and
+	// the pixel oracle flagged the resulting 96 pixels across FISHING:1-8,
+	// WALKSTUF:1/3, ACTIVITY:9 and MARY:2. The port is right; this was the bug.
+	w := x2 - x1 + 1
+	h := y2 - y1 + 1
 
 	if w <= 0 || h <= 0 {
 		delete(activeClipZones, sur)

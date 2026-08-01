@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+
+	rl "github.com/gen2brain/raylib-go/raylib"
 )
 
 // Draw-call trace: a canonical, diffable log of what each TTM frame draws, so
@@ -163,6 +165,24 @@ func traceDraw(x, y int16, spriteNo, imageNo uint16, flip bool) {
 		f = 1
 	}
 	fmt.Fprintf(traceOut, "  DRAW s=%d img=%d @%d,%d flip=%d\n", spriteNo, imageNo, x, y, f)
+}
+
+// traceClip logs the ACTIVE clip rect for a layer at draw time, under
+// JC_TRACE_RESOLVE. The clip is the prime suspect for sprite edges that differ
+// by exactly one pixel: the TTM args are INCLUSIVE corners (x1,y1)-(x2,y2), so
+// the width is x2-x1+1, and an engine computing x2-x1 clips one column (and one
+// row) short. Logging the rect each engine actually applied — rather than the
+// opcode args — is what distinguishes "the scripts disagree" from "the same
+// script produced different rects".
+func traceClip(sur *rl.RenderTexture2D) {
+	if !traceEnabled || !traceResolve {
+		return
+	}
+	if r, ok := activeClipZones[sur]; ok {
+		fmt.Fprintf(traceOut, "    CLIP %.0f,%.0f %.0fx%.0f\n", r.X, r.Y, r.Width, r.Height)
+	} else {
+		fmt.Fprintf(traceOut, "    CLIP none\n")
+	}
 }
 
 // traceDrawResolved logs the sheet/size behind a draw, when JC_TRACE_RESOLVE is
