@@ -250,7 +250,55 @@ while VISITOR:5 was still wrong (the STOP alias is ~120 frames in). A short
 horizon only proves the OPENING of each scene matches. Current status is
 **66/66 at 15, 60 and 150 frames**.
 
-### The oracle diff cannot see rendering bugs — look at the picture too
+### Speed round 2 (sweep: 1m32s @15 frames → 20s @60, 31s @150)
+
+Two changes, each verified byte-identical to the previous oracle:
+
+- **`grUpdateDisplay` returns immediately in trace mode.** The trace is emitted
+  by `ttmPlay`'s opcode handlers; compositing every layer onto
+  `grFinalRenderSur` and presenting it was pure overhead — and it *dominated*
+  (4.70s of a 4.9s scene at 60 frames, scaling linearly with frame count).
+  Skipping it: **4.70s → 0.23s/scene**, and it no longer scales with frames.
+- **The sweep switches scenes IN-PAGE** (`window.__load`) instead of reloading
+  the document per scene (1.34s → 0.48s). Reloading re-parsed the app and
+  re-decoded every sprite sheet. `loadAnimation` now caches decoded sheets by
+  URL, which is what makes the switch cheap (ADS scripts share TTMs heavily).
+  Verified identical to a cold reload, including visiting scenes in a different
+  order. `COLD_RELOAD=1` forces the old path if a state leak is ever suspected.
+
+Consequence: **there is no longer any reason to sweep at 15 frames.** 150 frames
+now costs less than 15 did, and 15 twice hid real bugs (see above).
+
+**Pin Playwright to 1.61.0** (`uv run --with playwright==1.61.0 …`). Plain
+`--with playwright` resolves to whatever is newest and then demands a browser
+build that isn't in `~/.cache/ms-playwright` — the sweep dies at launch. 1.61.0
+matches cached chromium 1228.
+
+### The oracle diff cannot see rendering bugs — so there is a PIXEL oracle too
+
+`ts/tools/oracle-diff/pixels.py` compares RENDERED FRAMES, not draw calls:
+Go writes per-frame PNGs when the traceserver request carries a 4th field (a
+shot directory → `traceShots`); the TS side returns the same frames from
+`window.__shots(n)`. First run found **16/66 scenes with real rendering
+differences that the draw-call sweep rates 66/66 perfect.**
+
+Both sides capture *layers only, over transparency* — no island backdrop, no
+clouds. Those are engine-side procedural animation (drawn straight to the
+background surface, emitting no TTM draw calls) that the Canvas2D port
+deliberately doesn't reproduce; including them would make every frame differ on
+out-of-scope content. Their timers still run, so scheduling is unaffected.
+Shot mode also zeroes `grDx/grDy`: VARPOS scenes randomize the island position
+from the UNSEEDED global rand, so the same scene lands elsewhere every run,
+while the port pins the offset to 0 for its baked backdrop.
+
+Known differences it currently reports (all pre-existing, none regressions):
+- **JOHNNY:1/6, SUZY:1/2 (~12k px)** — the port fills an opaque black rect
+  behind the clock sprite where the engine leaves it transparent. Invisible in
+  practice (those scenes are on a black background) but a real key-colour bug.
+- **FISHING:1-8, WALKSTUF:1/3, ACTIVITY:9, MARY:2 (76-358 px)** — the port's
+  sprite is 1px wider/taller; the diff is a single edge row/column.
+
+### Look at the picture too
 
 The trace compares draw *calls*. A frame whose calls are perfect can still be
 composited or presented wrongly, and the sweep will happily report 66/66. A user

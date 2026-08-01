@@ -32,6 +32,15 @@ var (
 	traceCurTag        = uint16(0)
 	traceReachedBudget = false // set true once maxFrame frames are traced
 	traceOut           io.Writer = os.Stdout
+
+	// traceShots turns grUpdateDisplay's compositing back on and writes each
+	// displayed frame to traceShotDir as a PNG — the PIXEL oracle. The draw-call
+	// trace proves the interpreter is right; only rendered pixels can prove the
+	// COMPOSITOR is (layer order, layer lifetime, when a frame is presented).
+	// Every rendering bug found so far — Johnny vanishing in ACTIVITY:12, his
+	// last walk frame lost in BUILDING:1 — passed the draw-call diff untouched.
+	traceShots   = false
+	traceShotDir = ""
 )
 
 // traceInit opens the trace output file (raylib spams stdout/stderr with INFO

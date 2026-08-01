@@ -675,6 +675,19 @@ func grUpdateDisplay(
 	ttmHolidayThread *TTtmThread,
 	ttmCloudsThread *TTtmThread,
 ) {
+	// -trace / -traceserver: the oracle diff compares DRAW CALLS, which are
+	// emitted by ttmPlay's opcode handlers, not by anything below. Compositing
+	// every layer onto grFinalRenderSur and presenting it to the window is pure
+	// overhead there — and it dominated the sweep (~4.7s of a 4.9s scene at 60
+	// frames, scaling linearly with frame count). Skipping it entirely makes the
+	// Go side ~30x faster with a byte-identical trace.
+	//
+	// EXCEPT when the pixel oracle is capturing reference images (-traceshots),
+	// which needs the real composite. See grCaptureFrame.
+	if traceEnabled && !traceShots {
+		return
+	}
+
 	// In windowed mode and on the web, refresh the single full-window rect each
 	// frame so the letterboxed scene keeps fitting when the window/canvas
 	// resizes.
@@ -821,12 +834,25 @@ func grUpdateDisplay(
 			}
 
 			// Blit the background
-			drawTextureToFinal(grBackgroundSur, ModeFlipped)
+			//
+			// The pixel oracle (traceShots) skips the island background AND the
+			// clouds. Both are engine-side procedural animation (islandInit /
+			// islandAnimateClouds draw straight to grBackgroundSur and the cloud
+			// layer, emitting no TTM draw calls) that the Canvas2D port doesn't
+			// reproduce — it uses a baked ISLETEMP.SCR and no clouds. Compositing
+			// them here would make every reference frame differ from the port on
+			// content that is knowingly out of scope, drowning the sprite
+			// comparison that the pixel oracle actually exists to do. Their
+			// TIMERS still run (they quantize the scheduler's `mini` clock — see
+			// INSIGHTS.md), so skipping the blit does not affect scheduling.
+			if !traceShots {
+				drawTextureToFinal(grBackgroundSur, ModeFlipped)
 
-			// Blit the clouds
-			if ttmCloudsThread != nil {
-				if ttmCloudsThread.isRunning != 0 {
-					drawTextureToFinal(ttmCloudsThread.ttmLayer, ModeFlipped)
+				// Blit the clouds
+				if ttmCloudsThread != nil {
+					if ttmCloudsThread.isRunning != 0 {
+						drawTextureToFinal(ttmCloudsThread.ttmLayer, ModeFlipped)
+					}
 				}
 			}
 
@@ -1046,6 +1072,13 @@ func grUpdateDisplay(
 			}
 		}
 
+		// Pixel oracle: grab the composed 640x480 frame BEFORE it is letterboxed
+		// onto the window, so the reference image is resolution- and
+		// window-independent (and free of the iris/debug overlays drawn below).
+		if traceShots {
+			grCaptureFrame()
+		}
+
 		if grFinalRenderSur != nil {
 			for _, r := range monitorDrawRects {
 				drawTextureToScreen(grFinalRenderSur, ModeFlipped, r.offsetX, r.offsetY, r.renderW, r.renderH)
@@ -1180,6 +1213,28 @@ func grUpdateDisplay(
 			break
 		}
 	}
+}
+
+// grCaptureFrame writes the composed 640x480 frame to traceShotDir as
+// frame-NNN.png — the reference image for the PIXEL oracle (see trace.go's
+// traceShots). Called from grUpdateDisplay after compositing, before the
+// letterboxed blit to the window, so the PNG is exactly the virtual screen.
+//
+// The render texture is stored bottom-up (OpenGL convention), the same reason
+// every drawTextureToFinal call above passes ModeFlipped, so the readback is
+// flipped back here.
+func grCaptureFrame() {
+	if grFinalRenderSur == nil || traceShotDir == "" {
+		return
+	}
+	img := rl.LoadImageFromTexture(grFinalRenderSur.Texture)
+	if img == nil {
+		return
+	}
+	defer rl.UnloadImage(img)
+	rl.ImageFlipVertical(img)
+	path := filepath.Join(traceShotDir, fmt.Sprintf("frame-%04d.png", traceFrameNo))
+	rl.ExportImage(*img, path)
 }
 
 func grNewLayer() *rl.RenderTexture2D {

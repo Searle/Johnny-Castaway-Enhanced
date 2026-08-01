@@ -196,6 +196,23 @@ async function main() {
   if (params.has("dump")) {
     // Expose the live scheduler for harness/debug introspection.
     Object.defineProperty(window, "__sched", { get: () => scheduler });
+
+    // __load(ads, tag): switch scenes IN-PAGE, so a sweep doesn't reload the
+    // document per scene. A reload re-parses the app, re-fetches and re-decodes
+    // every sprite sheet and waits on networkidle — ~1.34s/scene, which was
+    // ~95% of the whole sweep's wall clock. Switching in-page keeps the decoded
+    // sheets in loadAnimation's cache and costs ~0.1s.
+    (window as unknown as { __load: (a: string, t: number) => Promise<boolean> }).__load = async (
+      adsName: string,
+      tag: number,
+    ) => {
+      const e = (index.ads ?? []).find((a) => a.name === adsName.toUpperCase());
+      if (!e) return false;
+      adsSelect.value = e.name;
+      fillAdsTags(e, tag);
+      await loadAdsScript(e, tag);
+      return true;
+    };
     (window as unknown as { __dumpStep: () => unknown }).__dumpStep = () => {
       // Advance ticks until one produces a new displayed frame (or the script
       // stops). This captures each frame once, ignoring wall-clock delay.
@@ -286,6 +303,37 @@ async function main() {
       runForFrames(n);
       setTraceSink(null);
       return lines.join("\n");
+    };
+
+    // __shots(n): the PIXEL oracle. Runs n frames and returns each COMPOSITED
+    // frame as a PNG data URL — the thread layers only, without the background,
+    // so it is directly comparable to the Go engine's `-traceserver` shot mode
+    // (which skips the island backdrop and clouds for the same reason: they are
+    // engine-side procedural animation this port deliberately doesn't render).
+    //
+    // This exists because the draw-call trace CANNOT see compositor bugs. Layer
+    // z-order, layer lifetime, and WHEN a frame is presented are all invisible
+    // to it — every rendering bug found so far (Johnny vanishing in
+    // ACTIVITY:12, his last walk frame dropped in BUILDING:1) passed the trace
+    // diff untouched while looking obviously wrong on screen.
+    (window as unknown as { __shots: (n: number) => string[] }).__shots = (n: number) => {
+      const shots: string[] = [];
+      setTraceSink(() => {}); // arms the deterministic RNG; trace text discarded
+      const prev = scheduler ? scheduler.onPresent : null;
+      if (scheduler) {
+        scheduler.onPresent = () => {
+          renderer.presentLayersOnly();
+          shots.push(canvas.toDataURL("image/png"));
+        };
+      }
+      try {
+        runForFrames(n);
+      } finally {
+        if (scheduler) scheduler.onPresent = prev;
+        setTraceSink(null);
+        renderer.present(); // restore the normal composite on screen
+      }
+      return shots;
     };
 
     // __schedlog(n): same run as __trace, but returns the SCHEDULER DECISION

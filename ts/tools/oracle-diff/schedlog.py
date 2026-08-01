@@ -7,7 +7,7 @@ directly — which shows WHICH BRANCH each engine took and why, instead of the
 downstream draw-call damage.
 
 Usage (from ts/, with a vite server on :5199):
-    uv run --with playwright python tools/oracle-diff/schedlog.py STAND 2 [frames]
+    uv run --with playwright==1.61.0 python tools/oracle-diff/schedlog.py STAND 2 [frames]
 
 Go side:
     JC_SCHED_LOG=1 ./JohnnyCastaway2026 -trace STAND 2 15 2>&1 >/dev/null | grep ^SCHED

@@ -79,4 +79,8 @@ export interface Renderer {
 
   // Composite background + saved zones + all layers (in order) onto the canvas.
   present(): void;
+
+  // Composite saved zones + layers only, over transparency (no background) —
+  // the pixel oracle's reference format, matching the Go engine's shot mode.
+  presentLayersOnly(): void;
 }

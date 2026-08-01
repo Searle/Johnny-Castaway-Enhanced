@@ -77,9 +77,31 @@ export function loadIndex(baseUrl: string): Promise<AnimIndex> {
   });
 }
 
+// Decoded-animation cache, keyed by baseUrl. Decoding a TTM's sheets means one
+// createImageBitmap per sprite (hundreds per TTM), and ADS scripts share TTMs
+// heavily — STAND.ADS's 15 entry tags all use the same ones. Caching makes a
+// scene switch nearly free after the first load, which is what lets the oracle
+// sweep switch scenes in-page instead of reloading the document each time.
+//
+// The entries are immutable: TtmThread only ever READS manifest.ops and blits
+// the ImageBitmaps, and per-thread state (bmpSlots etc.) lives on the thread.
+const animCache = new Map<string, Promise<{ manifest: Manifest; sheets: Map<string, LoadedSheet> }>>();
+
 // Load the manifest and every referenced PNG (screens + sprite sheets) as
 // ImageBitmaps, keyed by uppercase resource name.
-export async function loadAnimation(
+export function loadAnimation(
+  baseUrl: string,
+): Promise<{ manifest: Manifest; sheets: Map<string, LoadedSheet> }> {
+  const hit = animCache.get(baseUrl);
+  if (hit) return hit;
+  const p = loadAnimationUncached(baseUrl);
+  animCache.set(baseUrl, p);
+  // Don't cache failures — a transient fetch error shouldn't poison the entry.
+  p.catch(() => animCache.delete(baseUrl));
+  return p;
+}
+
+async function loadAnimationUncached(
   baseUrl: string,
 ): Promise<{ manifest: Manifest; sheets: Map<string, LoadedSheet> }> {
   const manifest: Manifest = await fetch(`${baseUrl}/manifest.json`).then((r) => {

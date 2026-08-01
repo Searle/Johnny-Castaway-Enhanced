@@ -199,6 +199,20 @@ export class Canvas2DRenderer implements Renderer {
     this.savedZones = null;
   }
 
+  // presentLayersOnly composites the saved-zones + thread layers WITHOUT the
+  // background, over transparency — the pixel oracle's reference format (see
+  // main.ts __shots). The Go side captures the same way, so the two images
+  // compare directly without the island backdrop (baked here, procedurally
+  // drawn and animated there) swamping the diff.
+  presentLayersOnly(): void {
+    const b = this.bufCtx;
+    b.clearRect(0, 0, this.width, this.height);
+    if (this.savedZones) b.drawImage(this.savedZones.canvas, 0, 0);
+    for (const layer of this.layers) b.drawImage(layer.canvas, 0, 0);
+    this.out.clearRect(0, 0, this.width, this.height);
+    this.out.drawImage(this.buf, 0, 0);
+  }
+
   present(): void {
     const b = this.bufCtx;
     // Compose into the back buffer. Black fill first: backgrounds are often

@@ -14,7 +14,7 @@ Prereqs:
       the WSLg display (it opens a window briefly).
     - A vite dev server serving the TS port (default http://localhost:5199).
       Start it with: npx vite --port 5199 --strictPort
-    - Playwright: run via `uv run --with playwright python tools/oracle-diff/diff.py ...`
+    - Playwright: run via `uv run --with playwright==1.61.0 python tools/oracle-diff/diff.py ...`
 """
 import subprocess, sys, os, re, difflib, time
 

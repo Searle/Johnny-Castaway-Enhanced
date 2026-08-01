@@ -821,6 +821,22 @@ func setupSceneForTrace(adsName string, tagNo int) string {
 				}
 				ttmDx = islandState.xPos + xOffset
 				ttmDy = islandState.yPos
+				// The PIXEL oracle needs a deterministic, port-comparable
+				// origin. VARPOS_OK scenes randomize islandState.xPos/yPos from
+				// the UNSEEDED global rand (storyCalculateIslandFromScene), so
+				// the same scene lands somewhere different every run — and the
+				// ts/ port pins grDx/grDy to 0 anyway, because it draws a baked
+				// ISLETEMP.SCR it cannot reposition (see INSIGHTS.md). Zero the
+				// offset in shot mode so the comparison is about WHICH sprites
+				// are drawn WHERE RELATIVE TO EACH OTHER, not about a random
+				// island placement neither side is testing. The draw-call trace
+				// is unaffected: it logs the raw, pre-offset coordinates.
+				if traceShots {
+					ttmDx = 0
+					ttmDy = 0
+					islandState.xPos = 0
+					islandState.yPos = 0
+				}
 			} else {
 				ttmDx = 0
 				ttmDy = 0
@@ -926,6 +942,15 @@ func runTraceServer() {
 		if len(fields) >= 3 {
 			fmt.Sscanf(fields[2], "%d", &frames)
 		}
+		// Optional 4th field: a directory to write per-frame PNGs into (the
+		// PIXEL oracle — see trace.go traceShots). Absent/"-" means trace only,
+		// which skips compositing entirely and is ~30x faster.
+		traceShotDir = ""
+		if len(fields) >= 4 && fields[3] != "-" {
+			traceShotDir = fields[3]
+			os.MkdirAll(traceShotDir, 0o755)
+		}
+		traceShots = traceShotDir != ""
 
 		// Fresh-process state for this scene, then capture its trace to a buffer.
 		// adsInit() zeroes every thread + the background/clouds/holiday threads
