@@ -146,15 +146,50 @@ class Canvas2DLayer implements Layer {
     const r = w / 2;
     const cx = x + this.dx + r;
     const cy = y + this.dy + r;
+    // Rasterized span-by-span rather than drawn with arc()+fill.
+    //
+    // Canvas antialiases an arc, the engine (rl.DrawCircle, a triangle fan) does
+    // not — JOHNNY:3/4/5's rising bubbles differed by ~380 px of fractional
+    // alpha. Filling integer spans per row reproduces the engine's hard edges.
+    //
+    // Span rule: a row is filled where the pixel centre falls inside the circle,
+    // which matches raylib exactly except at the very top and bottom rows, where
+    // its polygon overshoots the true circle by one pixel each side — replicated
+    // by `cap` below (measured against the engine's own output, not guessed).
     this.withClip((ctx) => {
-      ctx.beginPath();
-      ctx.arc(cx, cy, r, 0, Math.PI * 2);
       ctx.fillStyle = fill;
-      ctx.fill();
+      const y0 = Math.floor(cy - r),
+        y1 = Math.ceil(cy + r);
+      for (let py = y0; py < y1; py++) {
+        const dy = py + 0.5 - cy;
+        if (Math.abs(dy) > r) continue;
+        const half = Math.sqrt(r * r - dy * dy);
+        let left = Math.floor(cx - half);
+        let right = Math.ceil(cx + half) - 1;
+        // Cap rows: the fan's flat top/bottom edge covers one extra pixel each
+        // side of the analytic span.
+        const cap = r - Math.abs(dy) < 1;
+        if (cap) {
+          left -= 1;
+          right += 1;
+        }
+        if (right >= left) ctx.fillRect(left, py, right - left + 1, 1);
+      }
       if (stroke) {
-        ctx.strokeStyle = stroke;
-        ctx.lineWidth = 1;
-        ctx.stroke();
+        // The outline (rl.DrawCircleLines) is a 1px polygon on the same span
+        // boundaries; approximate it by stroking the extremes of each row.
+        ctx.fillStyle = stroke;
+        for (let py = y0; py < y1; py++) {
+          const dy = py + 0.5 - cy;
+          if (Math.abs(dy) > r) continue;
+          const half = Math.sqrt(r * r - dy * dy);
+          const left = Math.floor(cx - half),
+            right = Math.ceil(cx + half) - 1;
+          if (right >= left) {
+            ctx.fillRect(left, py, 1, 1);
+            ctx.fillRect(right, py, 1, 1);
+          }
+        }
       }
     });
   }
