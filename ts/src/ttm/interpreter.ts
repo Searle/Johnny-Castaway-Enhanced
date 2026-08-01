@@ -410,6 +410,18 @@ export class TtmThread {
         case Op.LOAD_SCREEN: {
           const sheet = this.sheets.get((raw.str ?? "").toUpperCase());
           this.renderer.setBackground(sheet?.frames[0] ?? null);
+          // A new backdrop INVALIDATES baked scenery: grLoadScreen releases
+          // grSavedZonesLayer before installing the new screen. Without this the
+          // port kept compositing a zone baked against the OLD backdrop for the
+          // rest of the run — JOHNNY:1/6 and SUZY:1/2 carried MEANWHIL.TTM's
+          // baked clock (and the black rect behind it) into the following
+          // scene, ~19k stale pixels the engine had already dropped.
+          //
+          // Not during fast-forward: that replays the prologue to reach an entry
+          // tag, whereas the engine jumps straight to the tag offset and never
+          // re-runs those LOAD_SCREENs, so clearing there would drop zones the
+          // engine still has.
+          if (!this.suppressDraw) this.renderer.clearSavedZones();
           break;
         }
         case Op.LOAD_IMAGE: {
