@@ -238,6 +238,7 @@ func ttmPlay(ttmThread *TTtmThread) {
 		switch opCode {
 		case 0x0080:
 			debugPrintln("\tCLEAR_IMGSLOT")
+			traceOp("CLEARIMGSLOT slot=%d", ttmThread.selectedBmpSlot)
 			grRestoreBmpSlot(ttmSlot, uint16(ttmThread.selectedBmpSlot))
 		case 0x0110:
 			debugPrintln("\tPURGE")
@@ -267,6 +268,7 @@ func ttmPlay(ttmThread *TTtmThread) {
 			debugPrintf("\tSET DELAY => %d\n", result)
 		case 0x1051:
 			debugPrintf("\tSET BMP SLOT: slot:%d\n", args[0])
+			traceOp("BMPSLOT %d", args[0])
 			ttmThread.selectedBmpSlot = uint8(args[0])
 		case 0x1061:
 			debugPrintf("\tSET_PALETTE_SLOT: slot:%d\n", args[0])
@@ -289,6 +291,7 @@ func ttmPlay(ttmThread *TTtmThread) {
 			ttmThread.nextGotoOffset = ttmFindTag(ttmSlot, args[0])
 		case 0x2002:
 			debugPrintf("\tSET_COLORS %d %d\n", args[0], args[1])
+			traceOp("COLORS fg=%d bg=%d", args[0], args[1])
 			ttmThread.fgColor = uint8(args[0])
 			ttmThread.bgColor = uint8(args[1])
 		case 0x2012:
@@ -322,6 +325,7 @@ func ttmPlay(ttmThread *TTtmThread) {
 				resName = ttmThread.ttmSlot.ResName
 			}
 			debugPrintf("\tSET_CLIP_ZONE [%s tag=%d]: raw=(%d,%d,%d,%d)\n", resName, ttmThread.sceneTag, args[0], args[1], args[2], args[3])
+			traceOp("CLIPZONE %d,%d-%d,%d", int16(args[0]), int16(args[1]), int16(args[2]), int16(args[3]))
 			grSetClipZone(ttmThread.ttmLayer, int16(args[0]), int16(args[1]), int16(args[2]), int16(args[3]))
 			if rect, ok := activeClipZones[ttmThread.ttmLayer]; ok {
 				debugPrintf("\t  -> final scissor rect: (%.0f,%.0f,%.0f,%.0f) virtualWidth=%d widescreenOffsetX=%d grDx=%d\n", rect.X, rect.Y, rect.Width, rect.Height, virtualWidth, widescreenOffsetX, grDx)
@@ -330,6 +334,7 @@ func ttmPlay(ttmThread *TTtmThread) {
 			}
 		case 0x4204:
 			debugPrintf("\tCOPY_ZONE_TO_BG: x:%d, y:%d, w:%d, h:%d\n", args[0], args[1], args[2], args[3])
+			traceOp("COPYZONE %d,%d %dx%d", int16(args[0]), int16(args[1]), args[2], args[3])
 			var handled bool
 			if ttmThread.lastOpWasRect {
 				handled = grTryRedrawLastRectToBg(ttmThread, int16(args[0]), int16(args[1]), args[2], args[3]) ||
@@ -407,9 +412,11 @@ func ttmPlay(ttmThread *TTtmThread) {
 			soundPlay(args[0])
 		case 0xF01F:
 			debugPrintf("\tLOAD_SCREEN: %q\n", finalStr)
+			traceOp("LOADSCREEN %s", finalStr)
 			grLoadScreen(finalStr)
 		case 0xF02F:
 			debugPrintf("\tLOAD_IMAGE: %q\n", finalStr)
+			traceOp("LOADIMAGE slot=%d %s", ttmThread.selectedBmpSlot, finalStr)
 			grLoadBmp(ttmSlot, uint16(ttmThread.selectedBmpSlot), finalStr)
 		case 0xF05F:
 			debugPrintf("\tLOAD_PALETTE: %q\n", finalStr)

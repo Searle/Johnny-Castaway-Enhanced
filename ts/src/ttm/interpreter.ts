@@ -411,10 +411,12 @@ export class TtmThread {
         }
 
         case Op.SET_BMP_SLOT:
+          if (!this.suppressDraw) trace(`  BMPSLOT ${a[0]}`);
           this.selectedBmpSlot = a[0];
           break;
 
         case Op.LOAD_SCREEN: {
+          if (!this.suppressDraw) trace(`  LOADSCREEN ${raw.str ?? ""}`);
           const sheet = this.sheets.get((raw.str ?? "").toUpperCase());
           this.renderer.setBackground(sheet?.frames[0] ?? null);
           // A new backdrop INVALIDATES baked scenery: grLoadScreen releases
@@ -432,6 +434,7 @@ export class TtmThread {
           break;
         }
         case Op.LOAD_IMAGE: {
+          if (!this.suppressDraw) trace(`  LOADIMAGE slot=${this.selectedBmpSlot} ${raw.str ?? ""}`);
           const sheet = this.sheets.get((raw.str ?? "").toUpperCase()) ?? null;
           this.bmpSlots[this.selectedBmpSlot] = sheet;
           // Record the first sheet loaded into a slot as its base (for
@@ -465,6 +468,7 @@ export class TtmThread {
         }
 
         case Op.SET_COLORS:
+          if (!this.suppressDraw) trace(`  COLORS fg=${a[0]} bg=${a[1]}`);
           this.fgColor = a[0];
           this.bgColor = a[1];
           break;
@@ -502,6 +506,7 @@ export class TtmThread {
             y1 = s16(a[1]),
             x2 = s16(a[2]),
             y2 = s16(a[3]);
+          if (!this.suppressDraw) trace(`  CLIPZONE ${x1},${y1}-${x2},${y2}`);
           if (x1 <= 0 && y1 <= 0 && x2 >= 639 && y2 >= 479) {
             this.layer.clearClip();
           } else {
@@ -515,11 +520,13 @@ export class TtmThread {
           // persistent saved-zones layer so it stays after the scene ends
           // (grCopyZoneToBg). Skipped during fast-forward (no rendered pixels).
           if (!this.suppressDraw) {
+            trace(`  COPYZONE ${s16(a[0])},${s16(a[1])} ${a[2]}x${a[3]}`);
             this.renderer.bakeZone(this.layer, s16(a[0]), s16(a[1]), a[2], a[3]);
           }
           break;
 
         case Op.CLEAR_IMGSLOT:
+          if (!this.suppressDraw) trace(`  CLEARIMGSLOT slot=${this.selectedBmpSlot}`);
           // Restore the selected BMP slot to its base (first-loaded) sheet if a
           // different one is loaded now (grRestoreBmpSlot). Lets a scene that
           // temporarily swapped a slot's image get the original back.
