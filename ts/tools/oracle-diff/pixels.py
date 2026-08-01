@@ -28,7 +28,7 @@ sprite comparison. Their timers still run on both sides, so scheduling is
 unaffected.
 
 Usage (from ts/, with a vite server on :5199 and the Go binary built):
-    uv run --with playwright==1.61.0 --with pillow python tools/oracle-diff/pixels.py [frames] [ADS tag]
+    uv run --with playwright==1.61.0 --with pillow --with numpy python tools/oracle-diff/pixels.py [frames] [ADS tag]
 
     # one scene, writing the differing frames out for inspection:
     PIXEL_OUT=/tmp/pix uv run ... tools/oracle-diff/pixels.py 60 BUILDING 1
@@ -112,27 +112,23 @@ def compare(go_img, ts_img):
     whether a pixel is drawn at all. That keeps the check about "is the right
     sprite in the right place", not about blending minutiae between an OpenGL
     render texture and a Canvas2D composite.
+
+    Vectorised with numpy — the per-pixel Python loop this replaces was 640*480
+    iterations per frame and made a full 66-scene pixel sweep take ~5m30s, of
+    which the comparison was the bulk.
     """
-    from PIL import Image
+    import numpy as np
     if go_img.size != ts_img.size:
         return -1, 0
-    gp = go_img.load()
-    tp = ts_img.load()
-    w, h = go_img.size
-    bad = 0
-    drawn = 0
-    for y in range(h):
-        for x in range(w):
-            g = gp[x, y]
-            t = tp[x, y]
-            ga = g[3] > 8
-            ta = t[3] > 8
-            if not ga and not ta:
-                continue
-            drawn += 1
-            if ga != ta or g[:3] != t[:3]:
-                bad += 1
-    return bad, drawn
+    g = np.asarray(go_img, dtype=np.uint8)
+    t = np.asarray(ts_img, dtype=np.uint8)
+    ga = g[:, :, 3] > 8
+    ta = t[:, :, 3] > 8
+    drawn_mask = ga | ta
+    # A pixel is bad if only one side drew it, or both drew it in different RGB.
+    rgb_differs = np.any(g[:, :, :3] != t[:, :, :3], axis=2)
+    bad_mask = drawn_mask & ((ga != ta) | (ga & ta & rgb_differs))
+    return int(np.count_nonzero(bad_mask)), int(np.count_nonzero(drawn_mask))
 
 
 def main():

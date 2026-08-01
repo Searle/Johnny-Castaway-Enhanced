@@ -688,6 +688,8 @@ func grUpdateDisplay(
 		return
 	}
 
+	capturedThisCall := false // pixel oracle: one shot per call, see below
+
 	// In windowed mode and on the web, refresh the single full-window rect each
 	// frame so the letterboxed scene keeps fitting when the window/canvas
 	// resizes.
@@ -1075,7 +1077,22 @@ func grUpdateDisplay(
 		// Pixel oracle: grab the composed 640x480 frame BEFORE it is letterboxed
 		// onto the window, so the reference image is resolution- and
 		// window-independent (and free of the iris/debug overlays drawn below).
-		if traceShots {
+		//
+		// Capture one shot per grUpdateDisplay call in which at least one TTM
+		// frame was drawn — i.e. one shot per DISPLAYED COMPOSITE, which is
+		// exactly what the TS side emits from its onPresent hook.
+		//
+		// Both halves of that condition matter. ads.go calls grUpdateDisplay once
+		// per scheduler iteration, including iterations where no thread's timer
+		// reached 0 and nothing was drawn (capturing those gave 16 shots for a
+		// 10-frame request); and a single iteration can run SEVERAL threads,
+		// emitting several traced frames but only one composite (capturing per
+		// frame gave 10 shots where the port presents 9). Either mismatch
+		// misaligns the sequences, which surfaces as phantom "1px sprite"
+		// differences between images that are simply not the same moment.
+		if traceShots && !capturedThisCall && traceFrameNo > lastShotFrameNo {
+			capturedThisCall = true
+			lastShotFrameNo = traceFrameNo
 			grCaptureFrame()
 		}
 
@@ -1233,8 +1250,16 @@ func grCaptureFrame() {
 	}
 	defer rl.UnloadImage(img)
 	rl.ImageFlipVertical(img)
-	path := filepath.Join(traceShotDir, fmt.Sprintf("frame-%04d.png", traceFrameNo))
+	// Number the shots with their OWN counter, not traceFrameNo. traceFrameNo is
+	// bumped by traceFrameEnd at the UPDATE opcode, i.e. AFTER this composite
+	// runs, and grUpdateDisplay's inner loop can composite more than once per
+	// traced frame — so using it both skipped indices (the first files written
+	// were frame-0002…) and overwrote shots. That silently misaligned the
+	// comparison: go_shots[i] and ts_shots[i] were different engine frames,
+	// which showed up as phantom "1px sprite" differences that did not exist.
+	path := filepath.Join(traceShotDir, fmt.Sprintf("frame-%04d.png", traceShotNo))
 	rl.ExportImage(*img, path)
+	traceShotNo++
 }
 
 func grNewLayer() *rl.RenderTexture2D {

@@ -41,6 +41,10 @@ var (
 	// last walk frame lost in BUILDING:1 — passed the draw-call diff untouched.
 	traceShots   = false
 	traceShotDir = ""
+	traceShotNo  = 0 // own counter — see grCaptureFrame for why not traceFrameNo
+	// traceFrameNo as of the last shot, so a composite is captured only when a
+	// new TTM frame was drawn since the previous one.
+	lastShotFrameNo = 0
 )
 
 // traceInit opens the trace output file (raylib spams stdout/stderr with INFO

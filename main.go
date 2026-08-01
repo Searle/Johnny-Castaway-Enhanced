@@ -951,6 +951,8 @@ func runTraceServer() {
 			os.MkdirAll(traceShotDir, 0o755)
 		}
 		traceShots = traceShotDir != ""
+		traceShotNo = 0
+		lastShotFrameNo = 0
 
 		// Fresh-process state for this scene, then capture its trace to a buffer.
 		// adsInit() zeroes every thread + the background/clouds/holiday threads
