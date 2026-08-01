@@ -307,14 +307,40 @@ Status: **61/66 pixel-identical.** History of that number and what each step was
   forgiven, and the rule is canary-tested to still catch a stray coloured
   pixel, a colour mismatch, and a 1px shift.
 
-Remaining 5 (FISHING:4/5/7/8, MARY:2 — 95-358 px): the tip of Johnny's fishing
-line, a 2-column stub at the far right of the screen. Localised to a single
-unflipped `MJFISH1.BMP` cel with no clip active. Two distinct causes, both open:
-the extractor's PNG has one more light pixel in that row than the engine's
-decoder produces, AND the live TS layer gains an interpolated mid-grey pixel
-(106 ≈ 212/2) that an isolated `drawImage` of the same cel does NOT produce.
-Invisible at normal size; both are pixel-data/compositing issues, not
-interpreter ones (the draw-call oracle is 66/66).
+Then **66/66 at 30 frames** after three line-rasterization fixes, and the sweep
+was deepened to 60 frames (which promptly read 48/66 — 30 was too shallow, the
+same trap as the draw-call oracle at 15). At 60 frames it now reads **52/66**.
+
+**Primitives were untraced until recently.** DRAW_LINE / DRAW_RECT /
+DRAW_CIRCLE / DRAW_PIXEL emitted no trace lines on either side, so "66/66
+identical" meant "identical in sprites, unchecked in primitives". Tracing them
+immediately exposed 4 diverging scenes (the port defaulted fgColor to 0 where
+adsAddScene uses 0x0f). Any future opcode added to one engine must be added to
+the trace too, or the oracle silently stops covering it.
+
+**1px primitives rasterize differently in GL and Canvas — three separate bugs:**
+- `rl.DrawLine` samples on the integer lattice (the corner between pixels), so
+  an axis-aligned line at x landed in column x-1. Fixed in the ENGINE with
+  `DrawLineV(+0.5)`.
+- Canvas antialiases stroke ENDPOINTS even on axis-aligned paths → axis-aligned
+  lines are now a `fillRect`.
+- Canvas antialiases DIAGONALS where GL picks one hard pixel per step →
+  diagonals now use Bresenham. Both follow GL_LINES' half-open convention (the
+  far endpoint is excluded).
+- Likewise `arc()+fill` antialiases where `rl.DrawCircle`'s triangle fan does
+  not → circles are filled span-by-span.
+
+Remaining at 60 frames, all small and catalogued:
+- **WALKSTUF:1 (300 px)** — NOT a bug. WALKSTUF.ADS tag 1 is in the fork's
+  `alwaysOnTopThreadTags`, a two-pass compositing reorder that puts Johnny's
+  thread above the boat regardless of slot order. The port omits the fork's
+  compositing special-cases by design (see AdsScheduler's header comment), so
+  the two draw the same cels in a different z-order.
+- **JOHNNY:2/3/4/5 (20-72 px)** — the cap rows of the LARGEST bubbles only.
+  raylib's fan segment count varies with radius; an exact match needs its own
+  segment maths, not the single cap rule used now.
+- **FISHING:1/2/3/6 (15 px), BUILDING:3, VISITOR:4/6/7, FISHING:4 (3-4 px)** —
+  not yet characterised.
 
 ### Look at the picture too
 
