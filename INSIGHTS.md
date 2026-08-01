@@ -291,12 +291,30 @@ Shot mode also zeroes `grDx/grDy`: VARPOS scenes randomize the island position
 from the UNSEEDED global rand, so the same scene lands elsewhere every run,
 while the port pins the offset to 0 for its baked backdrop.
 
-Known differences it currently reports (all pre-existing, none regressions):
-- **JOHNNY:1/6, SUZY:1/2 (~12k px)** — the port fills an opaque black rect
-  behind the clock sprite where the engine leaves it transparent. Invisible in
-  practice (those scenes are on a black background) but a real key-colour bug.
-- **FISHING:1-8, WALKSTUF:1/3, ACTIVITY:9, MARY:2 (76-358 px)** — the port's
-  sprite is 1px wider/taller; the diff is a single edge row/column.
+Status: **61/66 pixel-identical.** History of that number and what each step was:
+
+- **50/66** at first run.
+- **56/66** after fixing the engine's `SET_CLIP_ZONE` off-by-one (see the
+  UPSTREAM-ISSUES.md entry) — a real bug in shared engine code, in the ENGINE
+  not the port.
+- **61/66** after teaching the harness to ignore black-on-transparent. Both
+  engines composite over black, so a pixel one side draws BLACK and the other
+  leaves transparent is invisible; stripping the background for comparison
+  promoted that to a 12k-pixel "difference" (JOHNNY:1/6, SUZY:1/2,
+  WALKSTUF:1 — MEANWHIL.TTM's full-screen black `DRAW_RECT`, part of which the
+  port bakes via COPY_ZONE_TO_BG and the engine doesn't). Verified by
+  screenshotting the real composite: identical to the eye. Only BLACK is
+  forgiven, and the rule is canary-tested to still catch a stray coloured
+  pixel, a colour mismatch, and a 1px shift.
+
+Remaining 5 (FISHING:4/5/7/8, MARY:2 — 95-358 px): the tip of Johnny's fishing
+line, a 2-column stub at the far right of the screen. Localised to a single
+unflipped `MJFISH1.BMP` cel with no clip active. Two distinct causes, both open:
+the extractor's PNG has one more light pixel in that row than the engine's
+decoder produces, AND the live TS layer gains an interpolated mid-grey pixel
+(106 ≈ 212/2) that an isolated `drawImage` of the same cel does NOT produce.
+Invisible at normal size; both are pixel-data/compositing issues, not
+interpreter ones (the draw-call oracle is 66/66).
 
 ### Look at the picture too
 
