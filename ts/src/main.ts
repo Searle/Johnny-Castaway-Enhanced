@@ -73,6 +73,7 @@ async function loadAdsScript(entry: AdsIndexEntry, entryTag: number) {
     scheduler = new AdsScheduler(ads, slots, renderer, {
       position: (slot, tag) => positionForScene(entry.name, slot, tag),
       island: sceneHasIsland(entry.name, entryTag),
+      adsName: entry.name,
     });
     scheduler.start(entryTag);
     frames = 0;

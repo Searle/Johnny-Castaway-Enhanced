@@ -177,6 +177,13 @@ export class TtmThread {
   // STOP_SCENE / IF_IS_RUNNING checks.
   sceneRootTag = 0;
 
+  // sceneTag starts at sceneRootTag and then FOLLOWS the script: ttm.go sets it
+  // on every TAG (0x1111) and LOCAL_TAG (0x1101) opcode, so it names the segment
+  // a thread is currently in rather than the scene it was spawned as. The
+  // compositing exceptions key on this one (see AdsScheduler.alwaysOnTop), so it
+  // has to track the same way or a thread would match the wrong rule.
+  sceneTag = 0;
+
   // sceneTimer is the ADS duration timer (ADD_SCENE arg3 < 0 → -arg3). It is
   // what decides PURGE's meaning in ttm.go:
   //
@@ -560,9 +567,17 @@ export class TtmThread {
           }
           break;
 
+        case Op.TAG:
+        case Op.LOCAL_TAG:
+          // Not a no-op: ttm.go records the tag a thread is currently inside.
+          // Only the compositing exceptions read it (see sceneTag's comment);
+          // control flow uses the pre-scanned tag table, not this.
+          this.sceneTag = a[0] ?? 0;
+          break;
+
         // Still no-op: SET_PALETTE_SLOT, SET_FRAME1, DRAW_SCREEN, PLAY_SAMPLE,
-        // LOAD_PALETTE, tag markers, and SAVE_IMAGE1/SAVE_ZONE (both genuine
-        // no-ops in the original C too — see graphics.go grSaveImage1/grSaveZone).
+        // LOAD_PALETTE, and SAVE_IMAGE1/SAVE_ZONE (both genuine no-ops in the
+        // original C too — see graphics.go grSaveImage1/grSaveZone).
         default:
           break;
       }

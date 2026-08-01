@@ -42,6 +42,27 @@ interface Chunk {
   ip: number; // op index just past the guard
 }
 
+// Threads that must composite ABOVE all others regardless of thread-slot order
+// (ads.go alwaysOnTopThreadTags → grUpdateDisplay's two-pass blit). Keys are
+// "ADS:slot:sceneTag".
+//
+// WOULDBE.TTM runs Johnny's own reaction as one thread concurrently with the
+// boat/girl as another. adsAddScene hands out the lowest free slot, Johnny gets
+// allocated first, and plain slot-order compositing therefore draws the later
+// thread on top of him — the picnic hamper renders across his chest. Measured
+// against the engine: removing the exception there changes WALKSTUF:1 by 1380 px
+// over 35 frames (300 px on the worst) and visibly flattens him.
+//
+// This is a fork-specific enhancement, not original-engine behaviour, and it is
+// deliberately a fixed list rather than a heuristic — see the ads.go comment for
+// why every heuristic tried was rejected.
+const ALWAYS_ON_TOP = new Set([
+  "WALKSTUF.ADS:1:1",
+  "WALKSTUF.ADS:1:2",
+  "WALKSTUF.ADS:1:6",
+  "WALKSTUF.ADS:1:14",
+]);
+
 // positionFor lets the caller supply per-scene grDx/grDy (story positioning).
 export type PositionFn = (slot: number, tag: number) => { dx: number; dy: number };
 
@@ -61,8 +82,10 @@ function schedLog(line: string): void {
 // (ADD_SCENE / STOP_SCENE / RANDOM / conditionals), drives all running scene
 // threads with the ads.go main-loop timing, and composites their layers.
 //
-// It is a faithful port of ads.go's core, minus the fork's compositing
-// special-cases (plane-chase z-order, freeze-on-stop decorations).
+// It is a faithful port of ads.go's core. Of the fork's compositing
+// special-cases it implements always-on-top (ALWAYS_ON_TOP above); the
+// plane-chase flip-aware z-order and freeze-on-stop decorations are still
+// omitted.
 export class AdsScheduler {
   private readonly ops: Op[];
   private readonly slots: Map<number, TtmSlot>;
@@ -80,6 +103,7 @@ export class AdsScheduler {
   private localChunks: Chunk[] = [];
   private lastPlayed: { slot: number; tag: number } | null = null;
   private stopped = false;
+  private readonly adsName: string;
 
   // The island background (waves) and clouds threads. We don't draw them — the
   // Canvas2D port uses a baked backdrop, and in the Go engine they render via
@@ -104,8 +128,11 @@ export class AdsScheduler {
     ads: AdsFile,
     slots: Map<number, TtmSlot>,
     renderer: Renderer,
-    opts: { rng?: () => number; position?: PositionFn; island?: boolean } = {},
+    opts: { rng?: () => number; position?: PositionFn; island?: boolean; adsName?: string } = {},
   ) {
+    // Uppercase "NAME.ADS", matching currentAdsName in ads.go — the compositing
+    // exception keys are built from it.
+    this.adsName = (opts.adsName ?? "").toUpperCase();
     this.ops = ads.ops;
     this.slots = slots;
     this.renderer = renderer;
@@ -397,7 +424,21 @@ export class AdsScheduler {
   // until his own thread next drew a frame. The oracle diff cannot catch this —
   // it compares draw CALLS, and the calls were right; only the pixels were lost.
   private rebuildLayers(): void {
-    this.renderer.orderLayers(this.live().map((s) => s.thread.layerRef));
+    const live = this.live();
+    // Two-pass "always on top" ordering (grUpdateDisplay). Normally layers
+    // composite in thread-slot order, but a scene running CONCURRENTLY with
+    // another can end up in a higher slot and draw over it. WALKSTUF.ADS tag 1
+    // is the case that matters: Johnny's thread is allocated first (lower slot)
+    // while the boat/hamper thread gets a higher one, so plain slot order draws
+    // the picnic hamper across his chest. Verified against the engine — with the
+    // exception disabled there, the hamper visibly flattens him.
+    //
+    // Keyed on the thread's CURRENT sceneTag (which TAG opcodes update), not its
+    // spawn tag, matching isAlwaysOnTopThread.
+    const onTop = (s: SceneThread) =>
+      ALWAYS_ON_TOP.has(`${this.adsName}:${s.slot}:${s.thread.sceneTag}`);
+    const ordered = [...live.filter((s) => !onTop(s)), ...live.filter(onTop)];
+    this.renderer.orderLayers(ordered.map((s) => s.thread.layerRef));
   }
 
   // addScene spawns a TtmThread for (slot, tag) on a fresh layer (adsAddScene).
@@ -421,6 +462,7 @@ export class AdsScheduler {
     const layer = this.renderer.newLayer();
     const thread = new TtmThread(slot.manifest, slot.sheets, this.renderer, layer, slotNo === 0 ? undefined : tag);
     thread.sceneRootTag = tag;
+    thread.sceneTag = tag; // adsAddScene: sceneTag starts at the root tag
     thread.setOrigin(dx, dy);
 
     // arg3 (ads.go:310-314), read as a SIGNED 16-bit value:
