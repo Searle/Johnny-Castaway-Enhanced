@@ -184,319 +184,163 @@ section). None is an unknown; two classes are deliberate stopping points.
   and TS interpreter.ts), so whole ADS chains diff, not just single scenes.
   `sweep.py` covers all 66 ADS entry tags.
 
-### The harness must fail loudly, or it will lie to you
+### Harness invariants — break one and it will lie to you
 
-- **A comparison that truncates to `min(len(go), len(ts))` silently passes any
-  TS trace that stopped early.** That single line inflated the score to a
-  confident-looking "63/66 byte-identical" when the honest number was **10/66**.
-  Worse, it produced a *plausible wrong story*: the few scenes that did fail
-  looked like a harmless "1-frame phase shift", and the shifting failure set
-  across runs got blamed on GPU contention. Both were fabrications of the
-  measurement. **Unequal trace length is a FAILURE, not a prefix match.**
-- The TS side must be polled for readiness (`window.__ready === true`, set once
-  assets are decoded and playback is live), never a blind `sleep`. A fixed sleep
-  racing async asset decode is what made trace lengths vary run-to-run.
-- Lesson worth keeping: when a metric and a symptom disagree, **distrust the
-  metric first**. Re-running the same scene 3× and diffing the divergence-set
-  md5 is the cheap discriminator between a real bug and a flaky harness.
+- **Unequal trace length is a FAILURE, not a prefix match.** A comparison that
+  truncates to `min(len(go), len(ts))` silently passes any trace that stopped
+  early. See rule 1 above for what that cost.
+- **Poll for readiness (`window.__ready === true`), never a blind `sleep`.** A
+  fixed sleep racing async asset decode made trace lengths vary run-to-run.
+- **Each scene needs fresh-process state** or traces differ: `adsInit()` (zeroes
+  every thread incl. background/clouds/holiday) + `traceResetForScene()`
+  (re-seeds both RNG streams, clears the frame budget). Verified byte-identical
+  to one-process-per-scene, and order-independent.
+- **Loop `adsPlay` until the frame budget fills**, mirroring `runTestMode` —
+  some scenes end their ADS chunk after one frame but re-enter to keep going.
+- **`-traceserver` filters raylib's own INFO spam by line prefix**; it shares
+  stdout with the `===TRACE …===`/`===END===` protocol.
+- **In-page scene switching (`window.__load`) must stay equivalent to a cold
+  reload.** It is what makes the sweep fast; `COLD_RELOAD=1` forces the old path
+  if a state leak is ever suspected.
+- **Any opcode added to one engine must be added to the trace too**, or the
+  oracle silently stops covering it (see rule 3).
 
-### Speed (sweep: 3m25s → 1m32s)
+### Debugging a scheduling divergence: diff DECISION SEQUENCES, not draw calls
 
-- `-traceserver` inits raylib ONCE and serves scenes from stdin
-  (`ADS tag frames` → `===TRACE X.ADS N===`…`===END===` on stdout; raylib's own
-  INFO spam interleaves on stdout, so filter by line prefix). Per-scene process
-  launch cost ~2s of GL init × 66.
-- Each scene needs fresh-process state or traces differ: `adsInit()` (zeroes all
-  threads incl. background/clouds/holiday) + `traceResetForScene()` (re-seeds
-  both RNG streams, clears the frame budget). Verified byte-identical to
-  per-process `-trace`, and order-independent.
-- Loop `adsPlay` until the frame budget fills — mirroring runTestMode. Some
-  scenes (STAND.ADS tag 14) end their ADS chunk after one frame but re-enter to
-  keep animating, so a single `adsPlay` returns early.
-- `sweep.py` pipelines Go against Playwright: fire the Go request, run the
-  independent TS trace while Go computes, then read the Go block → per-scene
-  cost becomes ~max(go, ts) instead of go+ts.
-- `traceEnabled` also skips the per-frame pacing sleep in graphics.go (the diff
-  steps by frame count, not wall clock).
-
-### Draw-call oracle: 66/66 byte-identical (deterministic, 150 frames)
-
-**How to debug this class of bug** — dump the SCHEDULER DECISION SEQUENCE from
-both engines and diff *that*, not the draw calls. Both sides now emit the same
-`SCHED …` line format:
+This is the technique that cracked every scheduler bug here, and it is the first
+thing to reach for when the draw-call sweep shows a divergence.
 
 - Go: `JC_SCHED_LOG=1 ./JohnnyCastaway2026 -trace STAND 2 15 2>&1 >/dev/null | grep ^SCHED`
-  (env-gated in `trace.go`; verified to leave the trace byte-identical, so it is
-  safe to leave in — no flip-build-revert needed, unlike `debugEnabled`).
-- TS: `uv run --with playwright python ts/tools/oracle-diff/schedlog.py STAND 2 15`
-  (`window.__schedlog(n)` in `?dump` mode).
+  (env-gated in `trace.go`, verified not to perturb the trace — safe to leave
+  in, unlike `debugEnabled` which needs flip-build-revert).
+- TS: `uv run --with playwright==1.61.0 python tools/oracle-diff/schedlog.py STAND 2 15`.
 
-Lines cover `op ADD_SCENE/STOP_SCENE` (with the live `skip=`/`rand=` flags),
-`IF_IS_RUNNING`/`IF_NOT_RUNNING` (with the `running=` each engine saw), `PICK`
-(the whole weighted op list, the total, and the draw), `ADD`/`STOP`/`REAP`/`FIRE`,
-and `LOOP`/`MINI` with the full thread array (`{idx=slot:tag rN tTimer dDelay
-stSceneTimer}`). The first line that differs is the bug; everything after it is
-downstream damage. Filter out `STOP idx=` when diffing — Go logs it on the reap
-path too, TS only on the explicit `stopScene`.
+Both emit the same `SCHED …` lines: `op ADD_SCENE/STOP_SCENE` with the live
+`skip=`/`rand=` flags, `IF_IS_RUNNING`/`IF_NOT_RUNNING` with the `running=` each
+engine saw, `PICK` with the whole weighted op list plus total and draw,
+`ADD`/`STOP`/`REAP`/`FIRE`, and `LOOP`/`MINI` with the full thread array
+(`{idx=slot:tag rN tTimer dDelay stSceneTimer}`). **The first differing line is
+the bug; everything after it is downstream damage.** Filter out `STOP idx=` —
+Go logs it on the reap path too, the port only on an explicit `stopScene`.
 
-**A cautionary tale about that RANDOM-desync theory.** The previous status entry
-here claimed the remaining 33 failures were one root cause: the ADS RANDOM stream
-going out of phase, because a STOP_SCENE was dropped from a random block
-(`inSkip` true where Go had it false), giving a total weight of 5 vs 6 and a
-different modulus. That story was **wrong in every particular** — the decision
-logs showed TS collecting `[stop:61 w1, nop w5]`, total 6, draw 3, picking
-exactly what Go picked. It had been inferred from the downstream draw-call diff
-rather than measured. Ten minutes of decision-sequence logging refuted it. The
-actual causes were four unrelated timing/harness bugs (below). **Diff the
-decisions before believing any story about which branch was taken.**
+### Engine rules the port must honour (each cost a real bug)
 
-### The six bugs behind the 33 draw-call failures (all fixed)
+Facts about how the engine actually behaves, salvaged from the bugs they caused.
+These are the ones a re-implementation gets wrong by default.
 
-1. **Scene entry didn't reset `delay` to 4.** `adsAddScene` sets `delay = 4`;
-   the TS `TtmThread` constructor fast-forwards the op stream to the entry tag
-   and inherited whatever `SET_DELAY`/`TIMER` it scanned past (STAND:2 entered
-   with 6 and 10). The engine jumps straight to the tag offset and never
-   executes those. Every later frame boundary shifted.
-2. **The `mini` clock was replaced by a 1-per-tick countdown.** ads.go computes
-   `mini` = smallest (`timer`, `delay`) across running threads, subtracts it
-   from every timer, *then* sleeps `mini*20ms`. The port dropped the sleep
-   (correct — the trace steps by frame) but ALSO dropped the subtraction
-   (wrong): that subtraction is what orders thread wake-ups relative to each
-   other. With 1-per-tick, a finished thread had to be force-reaped to avoid
-   stalling, so it died in the same iteration it ended instead of living out
-   its hold while other threads ran frames.
-3. **The background(waves)/clouds threads are a CLOCK, not just scenery.**
-   `adsInitIsland` starts both (`isRunning = 3`); `islandInit` then sets the
-   background thread to delay 8 (overriding the 40 above it), clouds to 8. They
-   draw via `grDrawSprite` straight to the background surface and emit **no**
-   trace lines — so a port that skips them looks fine — but their timers are in
-   the `mini` computation, which quantizes the whole scheduler to an 8-tick
-   grid. Without them `mini` swallows a 150-tick hold whole and every reap lands
-   on the wrong iteration. Modelled in the TS scheduler as pure metronomes
-   (timers only, no rendering). Only 4 scenes are non-ISLAND and must NOT run
-   them: JOHNNY:1, JOHNNY:6, SUZY:1, SUZY:2 (`sceneHasIsland`); everything else
-   either has the ISLAND flag or no story entry at all, and main.go's
-   `if !found || ISLAND` runs `adsInitIsland` for both.
-4. **The trace budget counted the wrong thing.** Go stops at the Nth ENDFRAME
-   (`traceFrameEnd` → `traceReachedBudget` → `adsPlay` returns *before* the
-   mini/reap step). The TS harness counted "ticks that changed the display" —
-   but one tick can run TWO threads and emit two frames, so the TS trace
-   overshot by a frame (16 vs 15) and scenes whose decisions and draw calls were
-   perfectly correct still failed on length. Budget where frames are emitted.
+- **`mini` is the engine's CLOCK, and dropping it breaks thread ordering.**
+  ads.go computes `mini` = smallest (`timer`, `delay`) across running threads,
+  subtracts it from every timer, *then* sleeps `mini*20ms`. A fixed-rate port
+  should drop the SLEEP (the trace steps by frame, not wall clock) but must keep
+  the SUBTRACTION — that is what orders thread wake-ups relative to each other.
+  Consequence: a scheduler tick advances the clock by `mini`, not by 1, so a
+  real-time caller has to charge `TICK_MS * mini` or playback runs that many
+  times too fast.
+- **The background(waves) and clouds threads are a CLOCK, not scenery.** They
+  draw via `grDrawSprite` straight to the background surface and emit NO trace
+  lines, so a port naturally skips them — but their timers take part in `mini`
+  and quantize the whole scheduler to an 8-tick grid (`adsInitIsland` starts
+  both; `islandInit` then sets background delay to 8, overriding the 40 above
+  it; clouds are 8). Without them `mini` swallows a 150-tick hold whole and
+  every reap lands on the wrong iteration. Model them as pure metronomes.
+  Only 4 scenes are non-ISLAND and must NOT run them: JOHNNY:1/6, SUZY:1/2.
+  Everything else either has the ISLAND flag or no story entry at all, and
+  main.go's `if !found || ISLAND` runs `adsInitIsland` for both.
+- **Composite at ads.go's `grUpdateDisplay` point** — after the frames are
+  drawn, BEFORE the reap frees a finished thread's layer. Presenting after the
+  tick returns silently drops every scene's FINAL frame. Corollary: a mere
+  membership change is not a display change; the moment between a reap and the
+  next scene's first draw is never presented.
+- **A thread's layer outlives other threads' add/stop.** Each layer is created
+  once (`grNewLayer`) and only that thread's own `CLEAR_SCREEN` or `grFreeLayer`
+  touches it. Rebuilding all layers to fix compositing ORDER erases every other
+  running scene — reorder in place instead.
+- **`LOAD_SCREEN` releases the saved-zones layer.** Baked scenery is bound to
+  the screen it was baked against; a new backdrop invalidates it.
+- **Primitives inherit `fgColor`/`bgColor` = `0x0f`** from `adsAddScene`, not 0.
+  A scene drawing a primitive before its first `SET_COLORS` depends on this.
+- **`SET_CLIP_ZONE` args are INCLUSIVE corners** — the span is `x2-x1+1`. (The
+  engine itself got this wrong; see `UPSTREAM-ISSUES.md`.)
+- **`STOP_SCENE (5,10)` also stops tags 7 and 8** — an explicit alias in
+  `adsStopSceneByTtmTag`, which VISITOR:5 depends on.
+- **`IF_LASTPLAYED_LOCAL`/`ADD_SCENE_LOCAL`** (ACTIVITY.ADS tag 7 only) register
+  a chunk at RUNTIME, and a matching local chunk SUPPRESSES the general dispatch
+  for that (slot, tag).
+- **Some entry tags legitimately run dry** before a frame budget fills
+  (STAND:14 GOSUBs to a one-scene tag). `runTestMode`/`-traceserver` just loop
+  `adsPlay` again — re-entry must NOT re-seed the RNG. The loop's exit condition
+  is ads.go's own `numThreads != 0`, not "an END opcode ran".
 
-5. **`IF_LASTPLAYED_LOCAL` / `ADD_SCENE_LOCAL` were no-ops.** These (0x1070 /
-   0x1520) occur in exactly ONE place — ACTIVITY.ADS tag 7 — which is why 15
-   frames never reached them. `IF_LASTPLAYED_LOCAL` registers a chunk at
-   RUNTIME (not at `adsLoad` time like the general ones), and a matching local
-   chunk SUPPRESSES the general dispatch for that (slot, tag). `ADD_SCENE_LOCAL`
-   is two-pass: reached via the guard above it, it's just the queued body;
-   replayed later by the trigger, it actually adds the scene (args (?, slot,
-   tag, arg3, ?)). With both stubbed out, the general chunk fired instead and
-   the script branched to scene 4:7 where the engine plays 4:22.
+### 1px primitives rasterize differently in GL and Canvas
 
-Plus: some entry tags legitimately run dry before the budget fills (STAND:14
-GOSUBs to a one-scene tag; STAND:1's chain can end early on a given RANDOM
-outcome). `runTestMode` / `-traceserver` just loop `adsPlay` again — re-entry
-must NOT re-seed the RNG. The exit condition is ads.go's own `for numThreads
-!= 0` (`isDrained`), not "an END opcode ran" (`isStopped`).
+Four separate traps, all found by the pixel oracle:
 
-6. **`STOP_SCENE (5, 10)` also stops tags 7 and 8.** An explicit alias in
-   `adsStopSceneByTtmTag`. VISITOR.ADS tag 5 depends on it: the chunk fired by
-   5:9's completion does `STOP_SCENE 5 10` to kill the *running* 5:7 before
-   adding 5:3. Without the alias nothing stopped, 5:7 kept running, and 5:3
-   landed in thread slot 1 instead of 0 — changing frame-emission order from
-   there on. Only visible at 150 frames (670 vs 656).
+- `rl.DrawLine` samples on the integer lattice (the corner between pixels), so
+  an axis-aligned 1px line at x lands in column x-1. The engine now uses
+  `DrawLineV(+0.5)` to draw through pixel centres.
+- Canvas antialiases stroke ENDPOINTS even on axis-aligned paths → use
+  `fillRect` for those.
+- Canvas antialiases DIAGONALS where GL picks one hard pixel per step → use
+  Bresenham.
+- `arc()+fill` antialiases where `rl.DrawCircle`'s triangle fan does not → fill
+  span-by-span.
 
-**Sweep at more than 15 frames.** 15 frames gave a clean 66/66 while ACTIVITY:7
-was still wrong (its local-chunk path is ~19 frames in); 60 frames gave 66/66
-while VISITOR:5 was still wrong (the STOP alias is ~120 frames in). A short
-horizon only proves the OPENING of each scene matches. Current status is
-**66/66 at 15, 60 and 150 frames**.
+All follow GL_LINES' half-open convention: the far endpoint is excluded.
 
-### Speed round 2 (sweep: 1m32s @15 frames → 20s @60, 31s @150)
+### The PIXEL oracle — what it sees that the draw-call oracle cannot
 
-Two changes, each verified byte-identical to the previous oracle:
-
-- **`grUpdateDisplay` returns immediately in trace mode.** The trace is emitted
-  by `ttmPlay`'s opcode handlers; compositing every layer onto
-  `grFinalRenderSur` and presenting it was pure overhead — and it *dominated*
-  (4.70s of a 4.9s scene at 60 frames, scaling linearly with frame count).
-  Skipping it: **4.70s → 0.23s/scene**, and it no longer scales with frames.
-- **The sweep switches scenes IN-PAGE** (`window.__load`) instead of reloading
-  the document per scene (1.34s → 0.48s). Reloading re-parsed the app and
-  re-decoded every sprite sheet. `loadAnimation` now caches decoded sheets by
-  URL, which is what makes the switch cheap (ADS scripts share TTMs heavily).
-  Verified identical to a cold reload, including visiting scenes in a different
-  order. `COLD_RELOAD=1` forces the old path if a state leak is ever suspected.
-
-Consequence: **there is no longer any reason to sweep at 15 frames.** 150 frames
-now costs less than 15 did, and 15 twice hid real bugs (see above).
-
-**Pin Playwright to 1.61.0** (`uv run --with playwright==1.61.0 …`). Plain
-`--with playwright` resolves to whatever is newest and then demands a browser
-build that isn't in `~/.cache/ms-playwright` — the sweep dies at launch. 1.61.0
-matches cached chromium 1228.
-
-### The oracle diff cannot see rendering bugs — so there is a PIXEL oracle too
-
-`ts/tools/oracle-diff/pixels.py` compares RENDERED FRAMES, not draw calls:
-Go writes per-frame PNGs when the traceserver request carries a 4th field (a
-shot directory → `traceShots`); the TS side returns the same frames from
-`window.__shots(n)`. First run found **16/66 scenes with real rendering
-differences that the draw-call sweep rates 66/66 perfect.**
+`pixels.py` compares RENDERED FRAMES. Go writes per-frame PNGs when the
+traceserver request carries a 4th field (a shot directory → `traceShots`); the TS
+side returns the same frames from `window.__shots(n)`.
 
 Both sides capture *layers only, over transparency* — no island backdrop, no
-clouds. Those are engine-side procedural animation (drawn straight to the
-background surface, emitting no TTM draw calls) that the Canvas2D port
-deliberately doesn't reproduce; including them would make every frame differ on
-out-of-scope content. Their timers still run, so scheduling is unaffected.
-Shot mode also zeroes `grDx/grDy`: VARPOS scenes randomize the island position
-from the UNSEEDED global rand, so the same scene lands elsewhere every run,
-while the port pins the offset to 0 for its baked backdrop.
+clouds, since those are engine-side procedural animation the Canvas2D port
+deliberately doesn't reproduce. Shot mode also zeroes `grDx/grDy`: VARPOS scenes
+randomize the island position from the UNSEEDED global rand, so the same scene
+lands elsewhere every run.
 
-Status: **61/66 pixel-identical.** History of that number and what each step was:
+Two harness rules learned here, both of which silently corrupted results:
 
-- **50/66** at first run.
-- **56/66** after fixing the engine's `SET_CLIP_ZONE` off-by-one (see the
-  UPSTREAM-ISSUES.md entry) — a real bug in shared engine code, in the ENGINE
-  not the port.
-- **61/66** after teaching the harness to ignore black-on-transparent. Both
-  engines composite over black, so a pixel one side draws BLACK and the other
-  leaves transparent is invisible; stripping the background for comparison
-  promoted that to a 12k-pixel "difference" (JOHNNY:1/6, SUZY:1/2,
-  WALKSTUF:1 — MEANWHIL.TTM's full-screen black `DRAW_RECT`, part of which the
-  port bakes via COPY_ZONE_TO_BG and the engine doesn't). Verified by
-  screenshotting the real composite: identical to the eye. Only BLACK is
-  forgiven, and the rule is canary-tested to still catch a stray coloured
-  pixel, a colour mismatch, and a 1px shift.
+- **One shot per DISPLAYED COMPOSITE**, not per traced frame and not per
+  scheduler iteration. `grUpdateDisplay` is called once per iteration including
+  ones where nothing drew (16 shots for a 10-frame request), and a single
+  iteration can run several threads emitting several frames but only one
+  composite (10 shots where the port presents 9). Either mismatch misaligns the
+  sequences and surfaces as phantom "1px sprite" differences.
+- **Ignore pure black vs transparent.** Both engines composite over black, so
+  that difference is invisible — but stripping the background for comparison
+  promotes it to a large false positive. Forgive ONLY black; canary-test that a
+  stray coloured pixel, a colour mismatch and a 1px shift are all still caught.
 
-Then **66/66 at 30 frames** after three line-rasterization fixes, and the sweep
-was deepened to 60 frames (which promptly read 48/66 — 30 was too shallow, the
-same trap as the draw-call oracle at 15). At 60 frames it now reads **53/66**.
-
-**Primitives were untraced until recently.** DRAW_LINE / DRAW_RECT /
-DRAW_CIRCLE / DRAW_PIXEL emitted no trace lines on either side, so "66/66
-identical" meant "identical in sprites, unchecked in primitives". Tracing them
-immediately exposed 4 diverging scenes (the port defaulted fgColor to 0 where
-adsAddScene uses 0x0f). Any future opcode added to one engine must be added to
-the trace too, or the oracle silently stops covering it.
-
-**1px primitives rasterize differently in GL and Canvas — three separate bugs:**
-- `rl.DrawLine` samples on the integer lattice (the corner between pixels), so
-  an axis-aligned line at x landed in column x-1. Fixed in the ENGINE with
-  `DrawLineV(+0.5)`.
-- Canvas antialiases stroke ENDPOINTS even on axis-aligned paths → axis-aligned
-  lines are now a `fillRect`.
-- Canvas antialiases DIAGONALS where GL picks one hard pixel per step →
-  diagonals now use Bresenham. Both follow GL_LINES' half-open convention (the
-  far endpoint is excluded).
-- Likewise `arc()+fill` antialiases where `rl.DrawCircle`'s triangle fan does
-  not → circles are filled span-by-span.
-
-**Trace coverage is the thing to audit first when the oracle "passes".** An audit
-of ttmPlay's 30 opcodes found only 12 emitted trace lines, and NINE of the
-untraced ones mutate rendering state. Every bug chased in that session was in
-that list — SET_CLIP_ZONE, SET_COLORS, LOAD_SCREEN. The tooling gap and the bug
-list were the same list. Now 18/30 are traced (the rest are genuine no-ops or
-control flow already visible via FRAME/GOTO/PURGE). If you add an opcode to one
-engine, add it to the trace, or the oracle silently stops covering it.
-
-Remaining at 60 frames, all small and catalogued:
-- **WALKSTUF:1 — FIXED, and the investigation is worth keeping.** It looked
-  like "not a bug, the port omits the fork's compositing special-cases by
-  design". Testing it disproved that: disabling `alwaysOnTopThreadTags` IN THE
-  ENGINE changes WALKSTUF:1 by 1380 px over 35 frames and visibly flattens
-  Johnny — the picnic hamper draws across his chest. The slot-ordering problem
-  is inherent to putting concurrent scenes on separate layers (adsAddScene hands
-  Johnny the lowest free slot; plain slot order then draws the later thread over
-  him), so it is genuine behaviour and the port now implements it.
-  Two caveats: only tag 1 is verified (tags 2/6/14 changed 0 px at the depths
-  tested), and the rule keys on `sceneTag`, which TAG/LOCAL_TAG opcodes mutate
-  mid-scene — the port had to start tracking that too, since `sceneRootTag`
-  would match the wrong rule once a thread moved between tags.
+**Open: 13 scenes differ at 60 frames.** All catalogued, no unknowns:
 - **JOHNNY:2/3/4/5 (20-72 px)** — the cap rows of the LARGEST bubbles only.
-  raylib's fan segment count varies with radius; an exact match needs its own
-  segment maths, not the single cap rule used now.
+  raylib's circle fan segment count varies with radius; an exact match needs its
+  own segment maths rather than the single cap rule used now.
 - **FISHING:1/2/3/6 (15 px), VISITOR:4/6/7, BUILDING:3, FISHING:4 (3-4 px)** —
-  ONE root cause: GL's per-step tie-breaking on a diagonal line. Every diff is a
-  single pixel stepping one row early/late on the same column
-  (`(235,248)` vs `(235,249)`), or a line endpoint included on one side only.
-  Measured against the engine's own pixels: an analytic `round(x1+dx*t)` walk
-  reproduces 173 of 176 pixels on FISHING's long fishing line, and Go's endpoint
-  inclusion is INCONSISTENT between lines in the same frame (`426,274-413,267`
-  includes its end; the five others in that frame do not) — that is GL's
-  diamond-exit rule, whose tie-breaks depend on sub-pixel geometry and are
-  implementation-defined. Matching it exactly means emulating that rule, not a
-  cleaner Bresenham. Cost/benefit says leave it: the affected pixels are single
-  dots on impact-lines and a fishing line, invisible at normal size.
+  ONE root cause: GL's per-step tie-breaking on diagonals. Every diff is a single
+  pixel stepping one row early/late on the same column, or a line endpoint
+  included on one side only. An analytic `round(x1+dx*t)` walk reproduces 173 of
+  176 pixels on FISHING's long line, and Go's endpoint inclusion is INCONSISTENT
+  between lines in the same frame — that is GL's diamond-exit rule, sub-pixel
+  dependent and implementation-defined. Matching it means emulating that rule,
+  not writing a cleaner Bresenham. **Deliberate stopping point:** the affected
+  pixels are single dots on impact-lines and a fishing line, invisible at normal
+  size.
 
-### Tooling gaps, ranked by what they actually cost
+### Tooling gaps still open
 
-Written after the fact, from what went wrong. The pattern is consistent: every
-hour lost went to a measurement with MORE THAN ONE possible cause.
+`blitcheck.py` covers sprite blits; there is **no single-primitive probe** for
+LINE/CIRCLE/RECT in a live layer, which is why the remaining GL tie-break residue
+had to be reverse-engineered from composited frames.
 
-1. **Untraced opcodes** (worst). "66/66 identical" meant sprites-only for a long
-   time. Cheap to audit — list the opcodes, list the ones that emit a trace
-   line, diff the two. Do this before believing any green sweep.
-2. **Runtime-resolved indices logged as raw numbers.** `img=1` is a BMP SLOT
-   whose meaning depends on every LOAD_IMAGE so far; it cannot be mapped by
-   reading data files. Three attempts chased the wrong cel before
-   `JC_TRACE_RESOLVE` made it print `JOHNWALK.BMP#2 48x73`. Rule: if a trace
-   field is an index into mutable state, log what it RESOLVES to.
-3. **Comparing composites when the question is about one operation.**
-   `blitcheck.py` (headless, no GL/browser/scheduler — just the blit
-   arithmetic on a numpy array) answered in seconds what an hour of staring at
-   overlapping sprites could not, and disproved a "fix" that had made things
-   worse. Build the measurement with ONE possible cause.
-4. **Sweeping too shallow.** 15 frames hid two bugs; 30 hid four more. Depth is
-   cheap now (150 frames ≈ 31s) — there is no reason to run short.
+There is **no headless engine harness**. A `-spriteprobe` attempt failed because
+`setupApp`/`grUpdateDisplay` are entangled with window, input and pacing state,
+and was reverted. Anything wanting to exercise engine drawing without a window
+needs those dependencies broken first.
 
-Still missing, in case it is ever needed:
-- **A single-primitive probe.** `blitcheck.py` covers sprite blits; there is no
-  equivalent for LINE/CIRCLE/RECT in a live layer, which is why the remaining
-  GL tie-break residue had to be reverse-engineered from composited frames.
-- **A headless engine harness.** A `-spriteprobe` attempt failed because
-  `setupApp`/`grUpdateDisplay` are entangled with window, input and pacing
-  state; it was reverted. Anything wanting to exercise engine drawing without a
-  window needs those dependencies broken first.
-
-### Look at the picture too
-
-The trace compares draw *calls*. A frame whose calls are perfect can still be
-composited or presented wrongly, and the sweep will happily report 66/66. A user
-spotting "Johnny is missing on frame 14 of ACTIVITY:12" found exactly that:
-
-- **Composite INSIDE the tick, at ads.go's `grUpdateDisplay` call site** — after
-  the frames are drawn, BEFORE the reap frees any finished thread's layer. This
-  is a position, not just a timing detail: a scene's last frame is drawn,
-  displayed, and only then does its layer go away. Presenting after `tick()`
-  returns (i.e. after the reap) silently DROPS every scene's final frame —
-  BUILDING.ADS tag 1 draws Johnny's last walking sprite on tag 16's layer,
-  PURGEs, and is reaped in the same iteration, so the viewer saw an empty island
-  where the engine shows him mid-stride. The scheduler now exposes an
-  `onPresent` hook and the callers (rAF loop, `__dumpStep`) composite there.
-  Bonus fix: the rAF loop runs several ticks per frame when catching up, and
-  presenting once at the end collapsed them into one — `onPresent` gives each
-  tick its own frame (BUILDING:1 went 78 → 93 distinct frames per 12s).
-- **Don't present between the reap and the next draw.** The same
-  `grUpdateDisplay`-before-reap ordering means the moment when the old scene has
-  been reaped and new ones added but nothing has drawn is never shown. The TS
-  `tick()` was reporting a membership change as `changed`, so the dump stepper
-  captured that in-between state: both fresh layers empty, the old one freed → a
-  blank frame. Only a frame that actually RAN counts as a display change.
-- **A thread's layer must outlive an add/stop of some OTHER thread.** In the
-  engine each thread's render texture is made once by `grNewLayer` and only its
-  own `CLEAR_SCREEN` (or `grFreeLayer` at stop) touches it. A `rebuildLayers`
-  that called `resetLayers()` and handed everyone a fresh empty layer to fix
-  compositing ORDER also erased every other running scene's pixels. Reorder the
-  existing layers instead (`orderLayers`), and free exactly one on stop/reap.
-- Not every empty frame is a bug: the engine itself emits draw-less frames (e.g.
-  BUILDING:2's `FRAME 0` is a bare `PURGE`+`ENDFRAME`). Check the oracle trace
-  before "fixing" a blank frame.
-
-**A tick is no longer one time-unit.** `scheduler.tick()` now advances the clock
-by `mini`, so the real-time render loop must charge `TICK_MS * lastTickCost`
-per tick instead of one `TICK_MS`, or playback runs ~8× too fast.
+One more trap worth stating on its own: **not every empty frame is a bug.** The
+engine itself emits draw-less frames (BUILDING:2's `FRAME 0` is a bare
+`PURGE`+`ENDFRAME`). Check the oracle trace before "fixing" a blank frame.
 
 ## Backdrops (SCR) are top-aligned at native size, never stretched
 
@@ -589,12 +433,12 @@ per tick instead of one `TICK_MS`, or playback runs ~8× too fast.
 - **Timing: one engine tick = 20ms, and a frame is held `delay` ticks.** ttmPlay
   sets `delay` (SET_DELAY min 4 / TIMER random); grUpdateDisplay holds the frame
   until `elapsed >= delay*0.02s`. The Go main loop subtracts `mini` (smallest
-  timer) each iteration THEN sleeps `mini*20ms`. A fixed-rate rAF port must NOT
-  copy the subtract-mini step — with no sleep it collapses every scene's delay
-  into one tick, so the whole script plays at a flat frame-per-tick (~30fps),
-  far too fast. Instead count each timer down by 1 per rAF tick and pace rAF at
-  ~20ms. (The single-thread TTM player already did this; only the ADS scheduler
-  had the bug.)
+  timer) each iteration THEN sleeps `mini*20ms`. **Keep the subtraction, drop
+  only the sleep** — see the `mini` entry under "Engine rules" above. (An
+  earlier version of this file advised the opposite, "count each timer down by 1
+  per rAF tick"; that is what broke multi-thread scene ordering and took a long
+  time to find. A port doing that must ALSO charge `TICK_MS * mini` per tick or
+  playback runs that many times too fast.)
 - OR-chained `IF_LASTPLAYED` guards share ONE body (a following RANDOM block):
   bookmark each guarded (slot,tag) pointing at the same body, so any of them
   completing fires that body. This is the intended self-sustaining idle loop —
