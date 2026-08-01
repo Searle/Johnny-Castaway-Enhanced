@@ -19,3 +19,7 @@ wasmtest/
 # oracle-diff trace output
 go-trace.txt
 go-trace-*.txt
+
+# Python bytecode from the oracle-diff tools
+__pycache__/
+*.pyc
