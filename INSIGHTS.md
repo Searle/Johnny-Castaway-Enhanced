@@ -3,6 +3,39 @@
 Hard facts and non-obvious learnings for future work on this repo. Not a
 changelog — only things that will save time or prevent repeating mistakes.
 
+## How to work on this repo (read this first)
+
+Five rules, each learned the expensive way. They are about METHOD, not about the
+engine, and they generalise past the parts of the codebase that produced them.
+
+1. **Distrust a good score before you trust the code.** A lenient comparison
+   (`min(len)` truncation) once faked a confident "63/66" when the truth was
+   10/66 — and it invented a plausible wrong story to go with it ("cosmetic
+   1-frame shift", "GPU contention"). When a metric and a symptom disagree,
+   suspect the metric first.
+2. **Sweep deeper than feels necessary.** 15 frames read 66/66 while two real
+   bugs sat at ~19 and ~120 frames in. 30 read 66/66 while four more hid past
+   it. Depth is cheap (150 frames ≈ 31s); there is no reason to run short.
+3. **Audit what your harness actually covers.** "66/66 identical" meant
+   sprites-only for a long time, because 18 of 30 opcodes emitted no trace line.
+   *The tooling gap and the bug list turned out to be the same list.*
+4. **Build the measurement that has ONE possible cause.** Every hour lost this
+   project went to a measurement with several. Composited frames stack 2-3
+   overlapping sprites; attributing a few pixels to one of them is guesswork.
+   `blitcheck.py` (headless, no GL/browser/scheduler) answered in seconds what
+   an hour of staring could not — and disproved a "fix" that had made things
+   worse.
+5. **Verify a hypothesis is load-bearing before building on it, and test the
+   ones that say "we don't need this".** Three separate root-cause stories in
+   this repo's history were confidently written down and all three were wrong
+   ("63/66", "RANDOM stream desync", "alwaysOnTopThreadTags is a workaround we
+   can delete"). Each was *inferred* from downstream damage rather than
+   measured. Ten minutes of instrumentation beat each of them.
+
+Corollary for the human-facing side: **the oracles cannot see everything.** Two
+of the three rendering bugs found were reported by a person looking at the
+screen, at a moment both sweeps read green. Run the thing and look at it.
+
 ## Build / platform
 
 - **`go run *.go` breaks build tags.** It passes every file explicitly, so
@@ -106,6 +139,36 @@ changelog — only things that will save time or prevent repeating mistakes.
 
 ## Oracle diff: compare the TS port against the Go engine (no more guessing)
 
+### START HERE — current state and how to reproduce it
+
+Two independent oracles. Both need a vite server on `:5199`
+(`npx vite --port 5199 --strictPort`, from `ts/`) and a built `JohnnyCastaway2026`.
+**Pin Playwright to 1.61.0** — plain `--with playwright` resolves to whatever is
+newest and then demands an uncached browser build, and the sweep dies at launch.
+
+| Oracle | Command (from `ts/`) | Status | Runtime |
+|---|---|---|---|
+| Draw calls | `uv run --with playwright==1.61.0 python tools/oracle-diff/sweep.py 150` | **66/66** | ~31s |
+| Pixels | `uv run --with playwright==1.61.0 --with pillow --with numpy python tools/oracle-diff/pixels.py 60` | **53/66** | ~6m |
+
+The draw-call oracle proves the INTERPRETER is right (same sprites, coords,
+order, timing, and — since the coverage audit below — the state opcodes too). It
+is structurally blind to the COMPOSITOR: layer z-order, layer lifetime and WHEN a
+frame is presented are all invisible to it, which is why the pixel oracle exists.
+Every rendering bug found so far passed the draw-call diff untouched.
+
+Supporting tools, each built to answer a question the sweeps could not:
+- `schedlog.py` + `JC_SCHED_LOG=1` — dump both engines' SCHEDULER DECISION
+  sequences and diff those. This is what cracks scheduling bugs; see below.
+- `JC_TRACE_RESOLVE=1` — adds `RESOLVED SHEET.BMP#n WxH` and `CLIP x,y wxh` per
+  draw, so runtime-resolved slot indices stop being guesswork.
+- `blitcheck.py` — headless single-sprite blit comparator (no GL, no browser, no
+  scheduler). Answers "do the two blit rules agree?" in seconds.
+- `PIXEL_OUT=/tmp/x` on `pixels.py` writes the differing frame pair out.
+
+**The remaining 13 pixel differences are all catalogued** (see the pixel-oracle
+section). None is an unknown; two classes are deliberate stopping points.
+
 - The Go engine can emit a **canonical draw-call trace** with `-trace <ADS> <tag>
   [maxFrames]` → writes `go-trace.txt` (one line per DRAW/CLEAR/DELAY/GOTO/PURGE,
   frame-delimited). It runs on the WSLg display (DISPLAY=:0; Mesa llvmpipe — do
@@ -156,7 +219,7 @@ changelog — only things that will save time or prevent repeating mistakes.
 - `traceEnabled` also skips the per-frame pacing sleep in graphics.go (the diff
   steps by frame count, not wall clock).
 
-### Status: 66/66 byte-identical (deterministic)
+### Draw-call oracle: 66/66 byte-identical (deterministic, 150 frames)
 
 **How to debug this class of bug** — dump the SCHEDULER DECISION SEQUENCE from
 both engines and diff *that*, not the draw calls. Both sides now emit the same
@@ -187,7 +250,7 @@ rather than measured. Ten minutes of decision-sequence logging refuted it. The
 actual causes were four unrelated timing/harness bugs (below). **Diff the
 decisions before believing any story about which branch was taken.**
 
-### The four bugs behind the 33 failures (fixed)
+### The six bugs behind the 33 draw-call failures (all fixed)
 
 1. **Scene entry didn't reset `delay` to 4.** `adsAddScene` sets `delay = 4`;
    the TS `TtmThread` constructor fast-forwards the op stream to the entry tag
@@ -309,7 +372,7 @@ Status: **61/66 pixel-identical.** History of that number and what each step was
 
 Then **66/66 at 30 frames** after three line-rasterization fixes, and the sweep
 was deepened to 60 frames (which promptly read 48/66 — 30 was too shallow, the
-same trap as the draw-call oracle at 15). At 60 frames it now reads **52/66**.
+same trap as the draw-call oracle at 15). At 60 frames it now reads **53/66**.
 
 **Primitives were untraced until recently.** DRAW_LINE / DRAW_RECT /
 DRAW_CIRCLE / DRAW_PIXEL emitted no trace lines on either side, so "66/66
@@ -339,11 +402,18 @@ control flow already visible via FRAME/GOTO/PURGE). If you add an opcode to one
 engine, add it to the trace, or the oracle silently stops covering it.
 
 Remaining at 60 frames, all small and catalogued:
-- **WALKSTUF:1 (300 px)** — NOT a bug. WALKSTUF.ADS tag 1 is in the fork's
-  `alwaysOnTopThreadTags`, a two-pass compositing reorder that puts Johnny's
-  thread above the boat regardless of slot order. The port omits the fork's
-  compositing special-cases by design (see AdsScheduler's header comment), so
-  the two draw the same cels in a different z-order.
+- **WALKSTUF:1 — FIXED, and the investigation is worth keeping.** It looked
+  like "not a bug, the port omits the fork's compositing special-cases by
+  design". Testing it disproved that: disabling `alwaysOnTopThreadTags` IN THE
+  ENGINE changes WALKSTUF:1 by 1380 px over 35 frames and visibly flattens
+  Johnny — the picnic hamper draws across his chest. The slot-ordering problem
+  is inherent to putting concurrent scenes on separate layers (adsAddScene hands
+  Johnny the lowest free slot; plain slot order then draws the later thread over
+  him), so it is genuine behaviour and the port now implements it.
+  Two caveats: only tag 1 is verified (tags 2/6/14 changed 0 px at the depths
+  tested), and the rule keys on `sceneTag`, which TAG/LOCAL_TAG opcodes mutate
+  mid-scene — the port had to start tracking that too, since `sceneRootTag`
+  would match the wrong rule once a thread moved between tags.
 - **JOHNNY:2/3/4/5 (20-72 px)** — the cap rows of the LARGEST bubbles only.
   raylib's fan segment count varies with radius; an exact match needs its own
   segment maths, not the single cap rule used now.
