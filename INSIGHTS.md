@@ -330,6 +330,14 @@ the trace too, or the oracle silently stops covering it.
 - Likewise `arc()+fill` antialiases where `rl.DrawCircle`'s triangle fan does
   not → circles are filled span-by-span.
 
+**Trace coverage is the thing to audit first when the oracle "passes".** An audit
+of ttmPlay's 30 opcodes found only 12 emitted trace lines, and NINE of the
+untraced ones mutate rendering state. Every bug chased in that session was in
+that list — SET_CLIP_ZONE, SET_COLORS, LOAD_SCREEN. The tooling gap and the bug
+list were the same list. Now 18/30 are traced (the rest are genuine no-ops or
+control flow already visible via FRAME/GOTO/PURGE). If you add an opcode to one
+engine, add it to the trace, or the oracle silently stops covering it.
+
 Remaining at 60 frames, all small and catalogued:
 - **WALKSTUF:1 (300 px)** — NOT a bug. WALKSTUF.ADS tag 1 is in the fork's
   `alwaysOnTopThreadTags`, a two-pass compositing reorder that puts Johnny's
@@ -339,8 +347,48 @@ Remaining at 60 frames, all small and catalogued:
 - **JOHNNY:2/3/4/5 (20-72 px)** — the cap rows of the LARGEST bubbles only.
   raylib's fan segment count varies with radius; an exact match needs its own
   segment maths, not the single cap rule used now.
-- **FISHING:1/2/3/6 (15 px), BUILDING:3, VISITOR:4/6/7, FISHING:4 (3-4 px)** —
-  not yet characterised.
+- **FISHING:1/2/3/6 (15 px), VISITOR:4/6/7, BUILDING:3, FISHING:4 (3-4 px)** —
+  ONE root cause: GL's per-step tie-breaking on a diagonal line. Every diff is a
+  single pixel stepping one row early/late on the same column
+  (`(235,248)` vs `(235,249)`), or a line endpoint included on one side only.
+  Measured against the engine's own pixels: an analytic `round(x1+dx*t)` walk
+  reproduces 173 of 176 pixels on FISHING's long fishing line, and Go's endpoint
+  inclusion is INCONSISTENT between lines in the same frame (`426,274-413,267`
+  includes its end; the five others in that frame do not) — that is GL's
+  diamond-exit rule, whose tie-breaks depend on sub-pixel geometry and are
+  implementation-defined. Matching it exactly means emulating that rule, not a
+  cleaner Bresenham. Cost/benefit says leave it: the affected pixels are single
+  dots on impact-lines and a fishing line, invisible at normal size.
+
+### Tooling gaps, ranked by what they actually cost
+
+Written after the fact, from what went wrong. The pattern is consistent: every
+hour lost went to a measurement with MORE THAN ONE possible cause.
+
+1. **Untraced opcodes** (worst). "66/66 identical" meant sprites-only for a long
+   time. Cheap to audit — list the opcodes, list the ones that emit a trace
+   line, diff the two. Do this before believing any green sweep.
+2. **Runtime-resolved indices logged as raw numbers.** `img=1` is a BMP SLOT
+   whose meaning depends on every LOAD_IMAGE so far; it cannot be mapped by
+   reading data files. Three attempts chased the wrong cel before
+   `JC_TRACE_RESOLVE` made it print `JOHNWALK.BMP#2 48x73`. Rule: if a trace
+   field is an index into mutable state, log what it RESOLVES to.
+3. **Comparing composites when the question is about one operation.**
+   `blitcheck.py` (headless, no GL/browser/scheduler — just the blit
+   arithmetic on a numpy array) answered in seconds what an hour of staring at
+   overlapping sprites could not, and disproved a "fix" that had made things
+   worse. Build the measurement with ONE possible cause.
+4. **Sweeping too shallow.** 15 frames hid two bugs; 30 hid four more. Depth is
+   cheap now (150 frames ≈ 31s) — there is no reason to run short.
+
+Still missing, in case it is ever needed:
+- **A single-primitive probe.** `blitcheck.py` covers sprite blits; there is no
+  equivalent for LINE/CIRCLE/RECT in a live layer, which is why the remaining
+  GL tie-break residue had to be reverse-engineered from composited frames.
+- **A headless engine harness.** A `-spriteprobe` attempt failed because
+  `setupApp`/`grUpdateDisplay` are entangled with window, input and pacing
+  state; it was reverted. Anything wanting to exercise engine drawing without a
+  window needs those dependencies broken first.
 
 ### Look at the picture too
 
