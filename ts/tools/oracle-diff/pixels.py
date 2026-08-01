@@ -124,7 +124,27 @@ def compare(go_img, ts_img):
     t = np.asarray(ts_img, dtype=np.uint8)
     ga = g[:, :, 3] > 8
     ta = t[:, :, 3] > 8
-    drawn_mask = ga | ta
+
+    # Ignore pixels where one side drew PURE BLACK and the other drew nothing.
+    #
+    # Both engines composite over a black background, so black-on-transparent is
+    # invisible to a viewer — but this comparison strips the background to make
+    # sprites comparable, which promotes it to a difference. JOHNNY:1/6 and
+    # SUZY:1/2 hit exactly that: MEANWHIL.TTM fills the screen with a black rect
+    # (SET_COLORS 5,5 + DRAW_RECT 0,0,640,350) and bakes part of it into the
+    # saved-zones layer with COPY_ZONE_TO_BG. The port keeps that black block,
+    # the engine does not, and the rendered scenes are pixel-identical to the
+    # eye — verified by screenshotting the real composite. Reporting 12278 px of
+    # "difference" for an invisible black-on-black rect is the harness lying, so
+    # the harness is what gets fixed.
+    #
+    # This only forgives BLACK. Any other colour appearing on one side is a real
+    # difference and is still counted.
+    g_black = ga & ~np.any(g[:, :, :3], axis=2)
+    t_black = ta & ~np.any(t[:, :, :3], axis=2)
+    invisible = (g_black & ~ta) | (t_black & ~ga)
+
+    drawn_mask = (ga | ta) & ~invisible
     # A pixel is bad if only one side drew it, or both drew it in different RGB.
     rgb_differs = np.any(g[:, :, :3] != t[:, :, :3], axis=2)
     bad_mask = drawn_mask & ((ga != ta) | (ga & ta & rgb_differs))
