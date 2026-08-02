@@ -1,4 +1,4 @@
-import type { Layer, Renderer } from "./renderer";
+import type { Layer, Renderer, Slot } from "./renderer";
 
 const W = 640;
 const H = 480;
@@ -218,20 +218,12 @@ export class Canvas2DRenderer implements Renderer {
   private readonly buf: OffscreenCanvas;
   private readonly bufCtx: OffscreenCanvasRenderingContext2D;
   private background: ImageBitmap | null = null;
-  // Drawable background surface (the engine's grBackgroundSur). The island is
-  // BUILT onto this — raft, palm, shore waves — rather than being a fixed
-  // bitmap, and the wave animation keeps repainting it. Composited directly on
-  // top of `background`, below saved zones and thread layers. Null until
-  // backgroundLayer() is first called, so plain scene playback is unaffected.
-  private bgLayer: Canvas2DLayer | null = null;
-  // Always-on-top surface (the engine's holiday thread, composited after every
-  // scene thread). Holiday decorations must not be occluded by the scene.
-  private overlay: Canvas2DLayer | null = null;
+  // The fixed compositor slots (see Slot in renderer.ts), each created on first
+  // use and each with a permanent place in the stack. Only `layers` below is a
+  // dynamic array. Slots survive resetLayers() — the island and clouds outlive
+  // the scenes drawn on them, exactly as in the engine.
+  private slots = new Map<Slot, Canvas2DLayer>();
   private layers: Canvas2DLayer[] = [];
-  // Persistent "saved zones" layer (grSavedZonesLayer): scenery baked by
-  // COPY_ZONE_TO_BG, composited above the background but below active layers.
-  // Created lazily on first bake.
-  private savedZones: Canvas2DLayer | null = null;
 
   constructor(canvas: HTMLCanvasElement) {
     const ctx = canvas.getContext("2d");
@@ -250,22 +242,21 @@ export class Canvas2DRenderer implements Renderer {
     this.background = img;
   }
 
-  backgroundLayer(): Layer {
-    if (!this.bgLayer) this.bgLayer = new Canvas2DLayer();
-    return this.bgLayer;
+  slot(name: Slot): Layer {
+    let layer = this.slots.get(name);
+    if (!layer) {
+      layer = new Canvas2DLayer();
+      this.slots.set(name, layer);
+    }
+    return layer;
   }
 
-  clearBackgroundLayer(): void {
-    this.bgLayer = null;
+  clearSlot(name: Slot): void {
+    this.slots.delete(name);
   }
 
-  overlayLayer(): Layer {
-    if (!this.overlay) this.overlay = new Canvas2DLayer();
-    return this.overlay;
-  }
-
-  clearOverlayLayer(): void {
-    this.overlay = null;
+  hasSlot(name: Slot): boolean {
+    return this.slots.has(name);
   }
 
   newLayer(): Layer {
@@ -274,9 +265,14 @@ export class Canvas2DRenderer implements Renderer {
     return layer;
   }
 
+  // Drops the SCENE layers only (slot 4). The fixed slots are deliberately
+  // untouched: the island and the clouds outlive every scene drawn on them, and
+  // in the engine only adsReleaseIsland takes them down. (An earlier version
+  // cleared the saved zones here too; that is the interpreter's job — a scene's
+  // own LOAD_SCREEN / RESTORE_ZONE releases them, since baked scenery is bound
+  // to the screen it was baked against.)
   resetLayers(): void {
     this.layers = [];
-    this.savedZones = null;
   }
 
   removeLayer(layer: Layer): void {
@@ -291,17 +287,12 @@ export class Canvas2DRenderer implements Renderer {
   }
 
   bakeZone(from: Layer, x: number, y: number, w: number, h: number): void {
-    if (!this.savedZones) this.savedZones = new Canvas2DLayer();
     // The source pixels live at (x+dx, y+dy) in the layer's canvas; copy that
     // same rect to the same place on the saved-zones layer. +2 width matches
     // grCopyZoneToBg's rounding fudge for a 2px hull gap in the original data.
     const { dx, dy } = from.origin;
     const src = (from as Canvas2DLayer).canvas;
-    this.savedZones.blitFrom(src, x + dx, y + dy, w + 2, h);
-  }
-
-  clearSavedZones(): void {
-    this.savedZones = null;
+    (this.slot("savedZones") as Canvas2DLayer).blitFrom(src, x + dx, y + dy, w + 2, h);
   }
 
   // presentLayersOnly composites the saved-zones + thread layers WITHOUT the
@@ -309,42 +300,62 @@ export class Canvas2DRenderer implements Renderer {
   // main.ts __shots). The Go side captures the same way, so the two images
   // compare directly without the island backdrop (baked here, procedurally
   // drawn and animated there) swamping the diff.
+  // Compositor introspection for tools/oracle-diff/cloudorder.py, which is the
+  // ONLY check that can see slot ORDER. The frame digest reports L=[...], the
+  // scene threads — clouds are slot 2 and never appear there, so no text oracle
+  // covers this. The probe reads the slots and the scene layers, finds pixels
+  // where a cloud and a scene overlap, and asks who won on screen; one image
+  // cannot answer that, because a cloud over open sea looks identical either
+  // way. Cheap accessors, no behaviour.
+  __slotCanvas(name: Slot): OffscreenCanvas | null {
+    return this.slots.get(name)?.canvas ?? null;
+  }
+  __layerCanvases(): OffscreenCanvas[] {
+    return this.layers.map((l) => l.canvas);
+  }
+
+  // blitSlot draws a fixed slot into the back buffer if it exists.
+  private blitSlot(name: Slot): void {
+    const layer = this.slots.get(name);
+    if (layer) this.bufCtx.drawImage(layer.canvas, 0, 0);
+  }
+
   presentLayersOnly(): void {
     const b = this.bufCtx;
     b.clearRect(0, 0, this.width, this.height);
-    if (this.savedZones) b.drawImage(this.savedZones.canvas, 0, 0);
+    // Slots 1 and 2 (island, clouds) are deliberately omitted — graphics.go:850
+    // skips exactly those under traceShots, for the same reason.
+    this.blitSlot("savedZones");
     for (const layer of this.layers) b.drawImage(layer.canvas, 0, 0);
+    this.blitSlot("holiday");
     this.out.clearRect(0, 0, this.width, this.height);
     this.out.drawImage(this.buf, 0, 0);
   }
 
+  // present composites the engine's five-slot stack, in grUpdateDisplay's order
+  // (graphics.go:672). The order is fixed here rather than implied by layer
+  // creation order — see the Slot comment in renderer.ts.
   present(): void {
     const b = this.bufCtx;
-    // Compose into the back buffer. Black fill first: backgrounds are often
-    // shorter than 480 (ISLETEMP.SCR is 640x350) and must be drawn 1:1, top-left
-    // aligned — NOT stretched to fill (grLoadScreen: ClearBackground black then
+    // 1. Background surface. Black fill first: backdrops are often shorter than
+    // 480 (ISLETEMP.SCR is 640x350) and must be drawn 1:1, top-left aligned —
+    // NOT stretched to fill (grLoadScreen: ClearBackground black then
     // DrawTexture at y=0 native size; stretching decoupled sprites from the
     // baked shoreline and put Johnny "on water").
     b.fillStyle = "#000";
     b.fillRect(0, 0, this.width, this.height);
-    if (this.background) {
-      b.drawImage(this.background, 0, 0);
-    }
+    if (this.background) b.drawImage(this.background, 0, 0);
     // The island (grBackgroundSur) paints over the ocean backdrop.
-    if (this.bgLayer) {
-      b.drawImage(this.bgLayer.canvas, 0, 0);
-    }
-    // Saved zones sit above the background, below the active thread layers.
-    if (this.savedZones) {
-      b.drawImage(this.savedZones.canvas, 0, 0);
-    }
-    for (const layer of this.layers) {
-      b.drawImage(layer.canvas, 0, 0);
-    }
-    // The holiday thread composites after every scene thread (WALKSTUF).
-    if (this.overlay) {
-      b.drawImage(this.overlay.canvas, 0, 0);
-    }
+    this.blitSlot("island");
+    // 2. Clouds: above the island, BELOW the saved zones and every scene.
+    this.blitSlot("clouds");
+    // 3. Saved zones: baked scenery that outlives the thread that drew it.
+    this.blitSlot("savedZones");
+    // 4. The scene threads, in ADS slot order.
+    for (const layer of this.layers) b.drawImage(layer.canvas, 0, 0);
+    // 5. Holiday decorations, composited after every scene thread so the
+    // Christmas tree is never hidden behind Johnny.
+    this.blitSlot("holiday");
     // Single atomic blit to the visible canvas.
     this.out.drawImage(this.buf, 0, 0);
   }

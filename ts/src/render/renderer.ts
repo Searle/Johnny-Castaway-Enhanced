@@ -40,6 +40,24 @@ export interface Layer {
   readonly origin: { dx: number; dy: number };
 }
 
+// The compositor's FIXED slots, named after the engine's own surfaces. Only
+// `layers[]` (the scene threads) is a dynamic array; everything else has a
+// permanent place in the stack, exactly as grUpdateDisplay (graphics.go:672)
+// blits it:
+//
+//   1 background surface (grBackgroundSur — the island is painted onto this)
+//   2 clouds             (ttmCloudsThread.ttmLayer)
+//   3 saved zones        (grSavedZonesLayer)
+//   4 thread layers      (ttmThreads[0..N], in slot order)  <- layers[]
+//   5 holiday            (ttmHolidayThread.ttmLayer)
+//
+// Clouds sit ABOVE the island and BELOW everything else — including the saved
+// zones. Pushing them into the same array as the scene threads (what this port
+// used to do) cannot express that: it made ordering depend on layer CREATION
+// order, which a scene change reshuffles, and clouds ended up mostly hidden
+// behind Johnny. Slots 1/2/3/5 are named surfaces for that reason.
+export type Slot = "island" | "clouds" | "savedZones" | "holiday";
+
 export interface Renderer {
   readonly width: number;
   readonly height: number;
@@ -48,26 +66,25 @@ export interface Renderer {
   // background persists across CLEAR_SCREEN and layer changes.
   setBackground(img: ImageBitmap | null): void;
 
-  // The drawable background surface (grBackgroundSur), created on first use.
-  // The island is BUILT onto this — raft, palm, animated shore — instead of
-  // being a fixed backdrop bitmap, so tide, raft stage and position are real.
-  // It composites directly above setBackground()'s image and below everything
-  // else, and deliberately survives resetLayers(): the island outlives the
-  // scenes drawn on top of it, exactly as it does in the engine.
-  backgroundLayer(): Layer;
+  // A fixed compositor slot, created on first use. Slots deliberately survive
+  // resetLayers(): the island and the clouds outlive the scenes drawn on top of
+  // them, exactly as they do in the engine (adsInitIsland once per episode,
+  // adsReleaseIsland at the end).
+  slot(name: Slot): Layer;
 
-  // Drop the background surface (adsReleaseIsland — end of an episode).
-  clearBackgroundLayer(): void;
+  // Drop a slot's surface (adsReleaseIsland, RESTORE_ZONE, end of an episode).
+  clearSlot(name: Slot): void;
 
-  // Always-on-top surface, composited after every thread layer — the engine's
-  // holiday thread. Survives resetLayers() like the background surface does.
-  overlayLayer(): Layer;
-  clearOverlayLayer(): void;
+  // Whether a slot currently exists, WITHOUT creating it (slot() is lazy). The
+  // frame digest reports saved-zone presence, and must not bring the layer into
+  // being just by asking about it.
+  hasSlot(name: Slot): boolean;
 
   // Create a fresh transparent layer stacked above all existing layers.
   newLayer(): Layer;
 
-  // Remove every layer (e.g. when switching scenes/scripts).
+  // Remove every SCENE layer (slot 4). The fixed slots are untouched — see the
+  // Slot comment above.
   resetLayers(): void;
 
   // Drop a single layer (its thread stopped — grFreeLayer).
@@ -90,13 +107,12 @@ export interface Renderer {
   // (x, y, w, h) are in the scene's virtual space; the layer's origin is added.
   bakeZone(from: Layer, x: number, y: number, w: number, h: number): void;
 
-  // Clear the persistent saved-zones layer (RESTORE_ZONE / new script).
-  clearSavedZones(): void;
-
-  // Composite background + saved zones + all layers (in order) onto the canvas.
+  // Composite the whole fixed stack (see Slot) onto the canvas.
   present(): void;
 
-  // Composite saved zones + layers only, over transparency (no background) —
-  // the pixel oracle's reference format, matching the Go engine's shot mode.
+  // Composite saved zones + scene layers + holiday only, over transparency —
+  // the pixel oracle's reference format. It deliberately EXCLUDES the island
+  // and clouds, matching graphics.go:850, where traceShots skips exactly those
+  // two: engine-side procedural animation that would swamp the sprite diff.
   presentLayersOnly(): void;
 }

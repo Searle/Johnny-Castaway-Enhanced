@@ -448,7 +448,7 @@ export class TtmThread {
           // tag, whereas the engine jumps straight to the tag offset and never
           // re-runs those LOAD_SCREENs, so clearing there would drop zones the
           // engine still has.
-          if (!this.suppressDraw) this.renderer.clearSavedZones();
+          if (!this.suppressDraw) this.renderer.clearSlot("savedZones");
           break;
         }
         case Op.LOAD_IMAGE: {
@@ -568,7 +568,7 @@ export class TtmThread {
         case Op.RESTORE_ZONE:
           // Clears the whole saved-zones layer (grRestoreZone →
           // grReleaseSavedLayer). Only GJGULIVR.TTM uses it.
-          if (!this.suppressDraw) this.renderer.clearSavedZones();
+          if (!this.suppressDraw) this.renderer.clearSlot("savedZones");
           break;
 
         case Op.GOTO_TAG:

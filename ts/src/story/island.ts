@@ -144,6 +144,15 @@ export class Island {
     return this.clouds.length;
   }
 
+  // Cloud state for tools/oracle-diff/cloudorder.py. Clouds spawn at y 25..101
+  // and Johnny stands at y>=279, so they almost never overlap on their own —
+  // "wait and watch" was inconclusive over 80 samples. The probe parks the
+  // clouds on the scene's own bounding box to FORCE the overlap it needs to
+  // judge slot order. Returns the live array deliberately.
+  __clouds(): Cloud[] {
+    return this.clouds;
+  }
+
   // animateWaves is islandAnimate(): ONE shore segment advances per call,
   // cycling through them, with each segment alternating between two frames.
   // That staggering is why the shoreline shimmers rather than pulsing.
