@@ -256,3 +256,95 @@ func traceDumpCel(slot *TTtmSlot, spriteNo, imageNo uint16) {
 	rl.ExportImage(*img, out)
 	fmt.Fprintf(os.Stderr, "[dumpcel] wrote %s (%dx%d)\n", out, tex.Width, tex.Height)
 }
+
+// ---- frame-digest oracle ----------------------------------------------------
+//
+// The draw-call trace proves the INTERPRETER is right; it is structurally blind
+// to the COMPOSITOR. The pixel oracle only partly covers that and costs ~6
+// minutes, so it gets run at the end, when a bug is already buried. The digest
+// is a TEXT oracle emitted at exactly the composite point, one line per
+// DISPLAYED COMPOSITE, cheap enough to run after every edit.
+//
+// What it verifies that nothing else does: WHICH layers are composited, in WHAT
+// ORDER, and WHEN a frame is shown. That is where every screensaver-era bug
+// lived (clouds in the wrong slot, a scene's final frame dropped, a layer reaped
+// an iteration early, a present on an iteration where nothing drew).
+//
+// Format (stable field order, no floats):
+//
+//	F <n> raft=<0-5> night=<0|1> zones=<0|1> L=[<slot>:<tag>,...] hol=<0|1>
+//
+// FIELDS DELIBERATELY DROPPED, because they are NONDETERMINISTIC on the Go side
+// alone and have nothing to do with compositing (measured: three identical
+// `STAND 2` runs gave clouds=4/1/2 and bg=OCEAN02/OCEAN01/OCEAN01):
+//
+//   - EVERYTHING about the clouds, count and running-flag alike: islandInit
+//     picks `rand.Int() % 6` clouds from the UNSEEDED global rand, and
+//     islandAnimateClouds sets isRunning = 0 when that count is 0, so even the
+//     boolean inherits the randomness (caught as a clouds=1/clouds=0 flip on
+//     one line in 3 of 12 runs — see the note on sampling below).
+//   - the backdrop NAME: islandInit picks the ocean screen the same way.
+//   - the island x/y: VARPOS scenes randomize those the same way (already
+//     zeroed here and in traceShots for the same reason).
+//   - the TIDE: storyCalculateIslandFromScene sets it from `rand.Int() % 2` on
+//     a LOWTIDE_OK scene. Measured over 10 identical `STAND 2` runs: 4 hi, 6 lo.
+//     (Four consecutive runs agreed first, which is exactly how a flaky field
+//     talks its way into an oracle — sample it properly before trusting it.)
+//
+// What survives is what the oracle is FOR: whether the cloud/holiday threads are
+// RUNNING (a slot-membership fact, not a random count), whether saved zones
+// exist, and above all L=[...] — which layers composite, in what order. Keeping
+// a nondeterministic field would mean either a flaky oracle or a weakened
+// comparison, and the plan is explicit that the layer list is the payload.
+//
+// Deliberately NO per-layer sprite count: no such counter exists on either side,
+// so it would have to be invented twice with identical semantics (when to reset,
+// whether CLEAR_SCREEN zeroes it, whether an off-screen blit counts) — a new
+// source of divergence unrelated to the bugs this exists to catch. The
+// draw-call oracle already proves sprite-level equality. Keep this about
+// STRUCTURE.
+var (
+	digestEnabled = false
+	digestFrameNo = 0
+	digestOut     io.Writer = os.Stdout
+)
+
+// digestResetForScene mirrors traceResetForScene for the digest's own counter.
+func digestResetForScene() {
+	digestFrameNo = 0
+}
+
+// emitDigest writes one line describing the composite that grUpdateDisplay is
+// about to blit. Everything comes from the arguments and islandState, so
+// nothing has to be drawn to produce it — which is what makes it as fast as the
+// draw-call sweep.
+func emitDigest(
+	ttmThreads []TTtmThread,
+	ttmHolidayThread *TTtmThread,
+	ttmCloudsThread *TTtmThread,
+) {
+	zones := 0
+	if grSavedZonesLayer != nil {
+		zones = 1
+	}
+	hol := 0
+	if ttmHolidayThread != nil && ttmHolidayThread.isRunning != 0 {
+		hol = 1
+	}
+
+	// The layer list IS the payload: membership and order are what catch
+	// z-order, layer-lifetime and reap-timing bugs. Emitted in composite order,
+	// i.e. the same fixed-array order grUpdateDisplay blits.
+	var l []string
+	for i := 0; i < MaxTTMThreads; i++ {
+		if ttmThreads[i].isRunning != 0 {
+			l = append(l, fmt.Sprintf("%d:%d", ttmThreads[i].sceneSlot, ttmThreads[i].sceneRootTag))
+		}
+	}
+
+	digestFrameNo++
+	fmt.Fprintf(digestOut,
+		"F %d raft=%d night=%d zones=%d L=[%s] hol=%d\n",
+		digestFrameNo, islandState.raft, islandState.night,
+		zones, strings.Join(l, ","), hol)
+}

@@ -440,6 +440,17 @@ func main() {
 			isPreview = true
 		} else if strings.HasPrefix(argLower, "/s") || strings.HasPrefix(argLower, "-s") {
 			isRun = true
+		} else if argLower == "-framedigest" || argLower == "/framedigest" {
+			// -framedigest: same stdin/stdout protocol as -traceserver, but each
+			// scene's block carries the FRAME DIGEST (one line per displayed
+			// composite) instead of draw calls. Kept as a separate mode, not
+			// mixed into the trace stream: they are separate oracles and mixing
+			// them breaks the draw-call sweep's 66/66. Checked before -trace/-t
+			// (shared prefix). traceEnabled skips the wall-clock pacing but keeps
+			// the engine clock (mini/timer/delay) exact — see graphics.go.
+			isTraceServer = true
+			traceEnabled = true
+			digestEnabled = true
 		} else if argLower == "-traceserver" || argLower == "/traceserver" {
 			// -traceserver: pay raylib/GL init ONCE, then read "ADS tag frames"
 			// lines from stdin and emit a delimited trace block per scene. Lets
@@ -831,7 +842,11 @@ func setupSceneForTrace(adsName string, tagNo int) string {
 				// are drawn WHERE RELATIVE TO EACH OTHER, not about a random
 				// island placement neither side is testing. The draw-call trace
 				// is unaffected: it logs the raw, pre-offset coordinates.
-				if traceShots {
+				// Same for the frame digest: it reports islandState.xPos, and a
+				// VARPOS scene would otherwise report a different random value
+				// every run, making the oracle nondeterministic on a field that
+				// has nothing to do with compositing.
+				if traceShots || digestEnabled {
 					ttmDx = 0
 					ttmDy = 0
 					islandState.xPos = 0
@@ -965,6 +980,12 @@ func runTraceServer() {
 		shouldExitApp = false
 		var buf bytes.Buffer
 		traceOut = &buf
+		// The digest shares the trace's per-scene buffer, so -framedigest gets
+		// the same ===TRACE/===END=== framing the harness reads. Writing
+		// straight to stdout instead left the lines outside the delimiters and
+		// the harness read an empty block for every scene.
+		digestOut = &buf
+		digestResetForScene()
 
 		adsName := setupSceneForTrace(ads, tag)
 		// Mirror runTestMode's loop EXACTLY: some scenes (e.g. STAND.ADS tag 14)
@@ -982,6 +1003,7 @@ func runTraceServer() {
 		}
 
 		traceOut = os.Stdout
+		digestOut = os.Stdout
 		fmt.Fprintf(out, "===TRACE %s %d===\n", adsName, tag)
 		out.Write(buf.Bytes())
 		fmt.Fprintln(out, "===END===")

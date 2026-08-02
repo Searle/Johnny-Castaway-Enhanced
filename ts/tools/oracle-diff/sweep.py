@@ -41,13 +41,18 @@ class GoTraceServer:
     """
 
     def __init__(self):
-        # -window: decorated, resizable window so the oracle is watchable while
-        # the sweep runs (set ORACLE_WINDOW=0 to run in the plain window).
         cmd = [GO_BIN, "-traceserver"]
-        if os.environ.get("ORACLE_WINDOW", "1") != "0":
+        env = dict(os.environ)
+        # No window by default: the draw-call trace comes from ttmPlay's opcode
+        # handlers and grUpdateDisplay returns early, so nothing is ever drawn —
+        # verified byte-identical between DISPLAY=:0 and DISPLAY= on STAND:2.
+        # ORACLE_WINDOW=1 restores a decorated, watchable window.
+        if env.get("ORACLE_WINDOW", "0") != "0":
             cmd.append("-window")
+        else:
+            env["DISPLAY"] = ""
         self.proc = subprocess.Popen(
-            cmd, cwd=REPO,
+            cmd, cwd=REPO, env=env,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             text=True, bufsize=1,
         )

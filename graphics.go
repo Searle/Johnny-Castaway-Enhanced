@@ -684,6 +684,18 @@ func grUpdateDisplay(
 	//
 	// EXCEPT when the pixel oracle is capturing reference images (-traceshots),
 	// which needs the real composite. See grCaptureFrame.
+	//
+	// THIRD PATH: the frame-digest oracle. It needs only the layer list, which
+	// is right here in the arguments, so it skips compositing entirely — like
+	// the draw-call path, and unlike traceShots, which must run the full
+	// letterbox/GPU/readback path because the pixel oracle needs real PIXELS
+	// (that readback is where its ~6 minutes goes, not waiting). Checked first
+	// so the digest never pays for compositing.
+	if digestEnabled {
+		emitDigest(ttmThreads, ttmHolidayThread, ttmCloudsThread)
+		return
+	}
+
 	if traceEnabled && !traceShots {
 		return
 	}

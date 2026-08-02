@@ -56,6 +56,10 @@ class GoShotServer:
 
     def __init__(self):
         cmd = [GO_BIN, "-traceserver"]
+        # UNLIKE sweep.py/digest.py, this one keeps a window by DEFAULT: the
+        # pixel oracle captures real composited frames (traceShots →
+        # grCaptureFrame → LoadImageFromTexture), so it needs a live GL surface.
+        # Do not "fix" this to headless the way the text oracles were.
         if os.environ.get("ORACLE_WINDOW", "1") != "0":
             cmd.append("-window")
         self.proc = subprocess.Popen(

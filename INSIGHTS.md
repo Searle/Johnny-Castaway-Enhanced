@@ -184,9 +184,17 @@ newest and then demands an uncached browser build, and the sweep dies at launch.
 | Check | Command (from `ts/`) | Status | Runtime |
 |---|---|---|---|
 | Draw calls | `uv run --with playwright==1.61.0 python tools/oracle-diff/sweep.py 150` | **66/66** | ~31s |
-| Pixels | `uv run --with playwright==1.61.0 --with pillow --with numpy python tools/oracle-diff/pixels.py 60` | **53/66** | ~6m |
+| Frame digest | `uv run --with playwright==1.61.0 python tools/oracle-diff/digest.py 60` | **47/66** | ~27s |
+| Pixels | `uv run --with playwright==1.61.0 --with pillow --with numpy python tools/oracle-diff/pixels.py 60` | 48/66 (see below) | ~6m |
 | Walk animation | `npm run walk-check` | **1792/1792** | ~10s |
 | Story logic | `npm run story-check` | pass | ~2s |
+| Cloud/slot order | `uv run --with playwright==1.61.0 python tools/oracle-diff/cloudorder.py 45` | pass | ~50s |
+
+The **frame digest** (`digest.py`, Go side `-framedigest`) is the compositor
+gate added by RESTRUCTURE-PLAN Step 2: one line per DISPLAYED COMPOSITE,
+reporting which thread layers composite and in what order. It is what finally
+covers layer lifetime and presentation timing. See "the frame digest" below for
+its 19 known-failing scenes — they are ONE root cause, not nineteen.
 
 `walk-check` diffs the walk state machine frame-for-frame against a Go reference
 over every spot pair and start/end heading. **Caveat:** that reference
@@ -373,6 +381,78 @@ Two harness rules learned here, both of which silently corrupted results:
   not writing a cleaner Bresenham. **Deliberate stopping point:** the affected
   pixels are single dots on impact-lines and a fishing line, invisible at normal
   size.
+
+### The frame digest — what it caught, and what it cannot see
+
+`digest.py` emits one line per composite:
+`F <n> raft=.. night=.. zones=.. L=[<slot>:<tag>,...] hol=..`. `L=[...]` is the
+payload — which thread layers composite, in what order — and the line's position
+in the sequence is WHEN. 27s for all 66 tags, headless.
+
+**Fields deliberately absent, because they are nondeterministic on the GO side
+alone.** Measured, not assumed: ten identical `STAND 2` runs gave 4 `tide=hi` /
+6 `tide=lo`; the cloud count varied 4/1/2; the backdrop varied
+`OCEAN02`/`OCEAN01`. All come from the UNSEEDED global `rand` (`islandInit`,
+`storyCalculateIslandFromScene`). Even the cloud *boolean* inherits it, since
+`islandAnimateClouds` sets `isRunning = 0` when `numClouds == 0`. **The first
+four runs agreed before the flake showed up** — sample properly before trusting
+a field, and prefer dropping one over weakening the comparison.
+
+**19 of 66 fail, and it is ONE bug.** 14 are STAND; most differ by ±1..7
+composites. Root-caused via `JC_SCHED_LOG` (the decision-sequence diff, as
+always): with identical thread state `{1=1:35 r1 t6 d10 st0}`, the engine picks
+`mini` 1 then 5, the port picks 4 then 2. Both reach `t0` in two steps, so the
+DRAW CALLS are identical — which is exactly why the draw-call sweep reads 66/66
+on these same scenes — but each `mini` is one loop iteration and therefore one
+composite, so the port shows a different number of them. The port's background/
+clouds metronomes drift out of phase with the engine's; `islandAnimateClouds`
+stopping the cloud thread (`numClouds == 0`) removes it from the engine's `mini`
+while the port keeps ticking a phantom metronome. **Deferred to Step 3**, which
+rewrites the loop that owns this.
+
+**Canary-tested, and it FAILED one of the four.** RESTRUCTURE-PLAN Step 2 lists
+four deliberate bugs the digest must catch:
+
+| canary | result |
+|---|---|
+| scene's final frame dropped (present after the reap) | caught (93→92) |
+| a layer reaped one iteration early | caught (93→104) |
+| an extra present on a no-draw iteration | caught (93→128) |
+| **clouds composited in the wrong slot** | **NOT caught** |
+
+The last one slips through *by construction*: `L=[...]` lists scene threads, and
+clouds are a fixed slot that never appears in it. Three baseline-passing scenes
+stayed green with clouds deliberately blitted above every scene layer. **So the
+plan's premise that Step 2 makes Step 1 verifiable is wrong** — the digest and
+the compositor slots barely intersect. Slot order is covered by `cloudorder.py`
+instead (below). Run both.
+
+### cloudorder.py — the only check that sees SLOT ORDER
+
+One image cannot answer "are the clouds in the right slot?": a cloud over open
+sea looks identical whether it is slot 2 or slot 4. So this probe reads the slot
+surfaces and the scene layers directly, finds pixels where a cloud and a scene
+OVERLAP, and asks which one won on screen. Clouds spawn at y 25..101 while
+Johnny stands at y>=279, so they almost never overlap on their own — 80 samples
+of "wait and watch" were inconclusive — hence the probe parks the clouds on the
+scene's own bounding box to force the case.
+
+Canary-tested both directions: with clouds blitted above the scene layers,
+38,066 overlapping px, scene-on-top **0.0%**; with the fixed-slot compositor,
+40,878 px, scene-on-top **100.0%**, and clouds visible over sea/island 100%.
+
+Two harness traps it cost real time to find, both worth knowing for any browser
+probe here:
+
+- **Vite HMR races the probe.** Editing a source file mid-run leaves
+  `window.__renderer` pointing at a stale module instance whose slots are empty
+  — which reports as a silent all-zero "INCONCLUSIVE", not an error. Cache-bust
+  the URL and let vite settle before a run.
+- **Sampling a live rAF loop is racy.** Reading a slot canvas and the visible
+  canvas at different moments lets a drifting cloud move between the two,
+  surfacing as phantom "cloud hidden" pixels one column apart (adjacent x, the
+  two cloud greys swapped). Re-composite synchronously with `renderer.present()`
+  and snapshot, rather than sampling whatever the loop last painted.
 
 ### Tooling gaps still open
 

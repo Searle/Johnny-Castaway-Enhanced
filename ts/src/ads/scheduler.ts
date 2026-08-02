@@ -78,6 +78,33 @@ function schedLog(line: string): void {
   if (schedSink) schedSink(`SCHED ${line}`);
 }
 
+// Frame-digest oracle: one line per DISPLAYED COMPOSITE, emitted at exactly the
+// grUpdateDisplay point so the two engines' sequences align. It records WHICH
+// layers composite, in WHAT ORDER, and WHEN — the compositor structure that the
+// draw-call oracle is blind to and the pixel oracle is too slow to gate on.
+// Mirrors emitDigest in the Go engine's trace.go; see the format comment there.
+// Kept OUT of the draw-call trace stream: separate oracles, and mixing them
+// breaks the sweep's 66/66.
+export let digestSink: ((line: string) => void) | null = null;
+export function setDigestSink(fn: ((line: string) => void) | null): void {
+  digestSink = fn;
+  digestFrameNo = 0;
+}
+let digestFrameNo = 0;
+
+// The island state the digest reports. The port models the island separately
+// from the scheduler (it is engine-side procedural state), so the driver hands
+// it in rather than the scheduler reaching for it.
+export interface DigestIslandState {
+  raft: number;
+  night: boolean;
+  holiday: number;
+}
+let digestIsland: DigestIslandState | null = null;
+export function setDigestIsland(st: DigestIslandState | null): void {
+  digestIsland = st;
+}
+
 // AdsScheduler runs one .ADS script: it interprets the scene-director bytecode
 // (ADD_SCENE / STOP_SCENE / RANDOM / conditionals), drives all running scene
 // threads with the ads.go main-loop timing, and composites their layers.
@@ -423,7 +450,10 @@ export class AdsScheduler {
   // ACTIVITY.ADS tag 12 the seagull scene starting wiped Johnny, who vanished
   // until his own thread next drew a frame. The oracle diff cannot catch this —
   // it compares draw CALLS, and the calls were right; only the pixels were lost.
-  private rebuildLayers(): void {
+  // compositeOrder returns the live threads in the order their layers are
+  // blitted. Shared with the frame digest so the oracle reports the order the
+  // compositor actually uses rather than a second, drifting copy of the rule.
+  private compositeOrder(): SceneThread[] {
     const live = this.live();
     // Two-pass "always on top" ordering (grUpdateDisplay). Normally layers
     // composite in thread-slot order, but a scene running CONCURRENTLY with
@@ -437,8 +467,12 @@ export class AdsScheduler {
     // spawn tag, matching isAlwaysOnTopThread.
     const onTop = (s: SceneThread) =>
       ALWAYS_ON_TOP.has(`${this.adsName}:${s.slot}:${s.thread.sceneTag}`);
-    const ordered = [...live.filter((s) => !onTop(s)), ...live.filter(onTop)];
-    this.renderer.orderLayers(ordered.map((s) => s.thread.layerRef));
+    return [...live.filter((s) => !onTop(s)), ...live.filter(onTop)];
+  }
+
+  // rebuildLayers pushes that order into the compositor, in place.
+  private rebuildLayers(): void {
+    this.renderer.orderLayers(this.compositeOrder().map((s) => s.thread.layerRef));
   }
 
   // addScene spawns a TtmThread for (slot, tag) on a fresh layer (adsAddScene).
@@ -608,6 +642,7 @@ export class AdsScheduler {
     // catch this.
     if (changed) this.onPresent?.();
     this.lastTickPresented = changed;
+    this.emitDigest();
 
     // The trace's frame budget stops the run right after the frame is emitted —
     // ads.go returns from adsPlay on traceReachedBudget, BEFORE the mini/reap
@@ -692,6 +727,32 @@ export class AdsScheduler {
     return changed;
   }
 
+
+  // emitDigest writes one line describing the composite about to be displayed.
+  // Called unconditionally at the grUpdateDisplay point — ads.go composites on
+  // EVERY main-loop iteration, including ones where no thread drew, so gating
+  // this on `changed` would drop lines the Go side emits and misalign every
+  // later one.
+  private emitDigest(): void {
+    if (!digestSink) return;
+    const st = digestIsland;
+    const zones = this.renderer.hasSlot("savedZones") ? 1 : 0;
+    // The holiday slot only counts while its thread runs, matching the engine's
+    // `isRunning != 0` guard. Reported as a boolean, not the decoration id: the
+    // id is fine, but keeping every field a running/present FACT rather than a
+    // random value is what makes this oracle deterministic (see trace.go).
+    const hol = st && st.holiday !== 0 ? 1 : 0;
+    // COMPOSITE order, not raw slot order: the always-on-top pass reorders
+    // layers, and order is precisely what this oracle exists to check.
+    const l = this.compositeOrder()
+      .map((s) => `${s.slot}:${s.rootTag}`)
+      .join(",");
+    digestFrameNo++;
+    digestSink(
+      `F ${digestFrameNo} raft=${st?.raft ?? 0} night=${st?.night ? 1 : 0} ` +
+        `zones=${zones} L=[${l}] hol=${hol}`,
+    );
+  }
 
   // fireTriggeredChunks replays the ADS chunks guarded on this (slot, tag)
   // scene's completion (adsPlayTriggeredChunks). This is how MARY.ADS advances

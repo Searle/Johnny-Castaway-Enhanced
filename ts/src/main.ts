@@ -2,12 +2,19 @@ import { loadIndex, loadAnimation, type AnimIndex, type IndexEntry, type AdsInde
 import { Canvas2DRenderer } from "./render/canvas2d";
 import { TtmThread, setTraceSink, setSoundSink } from "./ttm/interpreter";
 import { SoundPlayer } from "./sound";
-import { AdsScheduler, loadAds, setSchedSink } from "./ads/scheduler";
+import {
+  AdsScheduler,
+  loadAds,
+  setSchedSink,
+  setDigestSink,
+  setDigestIsland,
+  type DigestIslandState,
+} from "./ads/scheduler";
 import { positionForScene, sceneHasIsland } from "./ads/positioning";
 import { Story, STORY_DAYS } from "./story/story";
 import { Island, ISLAND_DIR, type IslandAssets } from "./story/island";
 import { Walk } from "./story/walk";
-import { SceneFlag, type StoryScene } from "./story/data";
+import { SceneFlag, STORY_SCENES, type StoryScene } from "./story/data";
 import type { Layer } from "./render/renderer";
 import type { LoadedSheet } from "./manifest";
 
@@ -40,6 +47,13 @@ const soundToggle = $("soundToggle") as HTMLInputElement;
 
 const renderer = new Canvas2DRenderer(canvas);
 const soundPlayer = new SoundPlayer(`${ANIM_ROOT}/_SOUND`);
+// Handles for tools/oracle-diff/cloudorder.py, the only check that can see
+// compositor SLOT ORDER (the frame digest reports scene threads; clouds are a
+// fixed slot and never appear there). Exposed unconditionally rather than under
+// ?dump because the probe drives real story-mode playback, which dump mode
+// disables.
+(window as unknown as { __renderer: unknown }).__renderer = renderer;
+(window as unknown as { __island: unknown }).__island = () => story?.island ?? null;
 
 // Exactly one of these drives playback at a time.
 let thread: TtmThread | null = null;
@@ -67,8 +81,7 @@ let story: {
   // The island for the CURRENT episode, plus its animation layers. Rebuilt when
   // a FINAL scene ends the episode (adsReleaseIsland → adsInitIsland).
   island: Island | null;
-  cloudLayer: Layer | null;
-  // (holiday lives on the renderer overlay, not a story-owned layer)
+  // (the island, clouds and holiday live in the renderer's fixed slots)
   // Wave/cloud metronomes. Both run on an 8-tick delay in the engine, and they
   // are what quantizes the scheduler — see the metronome note in the scheduler.
   waveTimer: number;
@@ -91,17 +104,15 @@ function stopPlayback(keepStory = false) {
   thread = null;
   scheduler = null;
   if (!keepStory) story = null;
+  // Drops the SCENE layers only. The island, clouds and holiday are fixed
+  // compositor slots that outlive every scene drawn on them — no recreation
+  // dance needed to keep them under the next beat's layers.
   renderer.resetLayers();
-  if (keepStory && story) {
-    // resetLayers() just dropped the island's cloud/holiday layers along with
-    // the scene's. Recreate them first, so they sit UNDER the scene layers the
-    // next beat is about to add (newLayer stacks on top).
-    story.cloudLayer = story.island && story.island.cloudCount > 0 ? renderer.newLayer() : null;
-  }
   if (!keepStory) {
     renderer.setBackground(null);
-    renderer.clearBackgroundLayer();
-    renderer.clearOverlayLayer();
+    renderer.clearSlot("island");
+    renderer.clearSlot("clouds");
+    renderer.clearSlot("holiday");
     // Leaving story mode hands the backdrop back to the TTM interpreter.
     TtmThread.keepBackground = false;
   }
@@ -266,26 +277,21 @@ async function buildIsland(): Promise<void> {
   const island = new Island(assets, Math.random);
   const st = story.driver.island;
 
-  renderer.clearBackgroundLayer();
+  renderer.clearSlot("island");
+  renderer.clearSlot("clouds");
   renderer.setBackground(island.backdropFor(st));
-  island.build(st, renderer.backgroundLayer());
+  island.build(st, renderer.slot("island"));
   island.initClouds();
 
   story.island = island;
   // From here on the island owns the backdrop; scene LOAD_SCREENs must not
   // paint the baked ISLETEMP stand-in over it.
   TtmThread.keepBackground = true;
-  // Create the cloud layer NOW, while no scene layer exists. newLayer() stacks
-  // above everything present, so a lazily-created cloud layer would end up
-  // drawing OVER Johnny. Clouds belong between the island and the scene, which
-  // is exactly what creating it first gives us. (The engine gets this from its
-  // fixed thread order: background, clouds, then scene threads.)
-  story.cloudLayer = island.cloudCount > 0 ? renderer.newLayer() : null;
-  // Holiday decorations go on the always-on-top overlay: the engine runs them
-  // as their own thread composited after every scene thread, so the Christmas
-  // tree is never hidden behind Johnny.
-  renderer.clearOverlayLayer();
-  island.drawHoliday(st, renderer.overlayLayer());
+  // Holiday decorations go in the holiday slot: the engine runs them as their
+  // own thread composited after every scene thread, so the Christmas tree is
+  // never hidden behind Johnny.
+  renderer.clearSlot("holiday");
+  island.drawHoliday(st, renderer.slot("holiday"));
   story.waveTimer = 0;
   story.cloudTimer = 0;
 }
@@ -302,17 +308,15 @@ function animateIsland(cost: number): boolean {
   story.waveTimer -= cost;
   if (story.waveTimer <= 0) {
     story.waveTimer = ISLAND_TICK;
-    story.island.animateWaves(st, renderer.backgroundLayer());
+    story.island.animateWaves(st, renderer.slot("island"));
     changed = true;
   }
 
   story.cloudTimer -= cost;
   if (story.cloudTimer <= 0) {
     story.cloudTimer = ISLAND_TICK;
-    if (story.cloudLayer) {
-      story.island.animateClouds(story.cloudLayer);
-      changed = true;
-    }
+    story.island.animateClouds(renderer.slot("clouds"));
+    changed = true;
   }
   return changed;
 }
@@ -430,8 +434,7 @@ function finishWalk(): void {
 }
 
 function startStory(): void {
-  stopPlayback();
-  renderer.clearOverlayLayer();
+  stopPlayback(); // clears the island/clouds/holiday slots too
   const driver = new Story({
     loadProgress: () => {
       // A pinned day short-circuits persistence: report it as already-current
@@ -464,7 +467,6 @@ function startStory(): void {
     walk: null,
     advancing: false,
     island: null,
-    cloudLayer: null,
     waveTimer: 0,
     cloudTimer: 0,
   };
@@ -476,6 +478,34 @@ function dayOfYearNow(): number {
   const start = Date.UTC(d.getFullYear(), 0, 0);
   const now = Date.UTC(d.getFullYear(), d.getMonth(), d.getDate());
   return Math.floor((now - start) / 86_400_000);
+}
+
+// digestIslandForScene mirrors the Go engine's setupSceneForTrace (main.go),
+// which is the path -framedigest takes: the digest oracle runs scenes through
+// the ADS viewer, not story mode, so the island state it reports is derived the
+// same way there.
+//
+// Only `raft` is computed. The other printed fields are zero on that path by
+// construction, verified rather than assumed:
+//   - night / holiday: storyCalculateIslandFromDateAndTime is called ONLY from
+//     storyPlay (story.go:152), never from setupSceneForTrace, so islandState
+//     keeps the zeros adsInit left. Confirmed on every sampled scene.
+//   - position, tide, clouds, backdrop: dropped from the format entirely
+//     because they come from the UNSEEDED global rand — see trace.go's note.
+function digestIslandForScene(adsName: string, tag: number): DigestIslandState {
+  const name = adsName.toUpperCase();
+  const scene = STORY_SCENES.find((s) => s.adsName.toUpperCase() === name && s.adsTag === tag);
+  const st: DigestIslandState = { raft: 0, night: false, holiday: 0 };
+  if (!scene) return st;
+  // storyCalculateIslandFromScene's raft ladder, over setupSceneForTrace's day:
+  // a dated scene pins storyCurrentDay, otherwise it is activeConfig.CurrentDay
+  // (1 for the freshly-built binary the oracle harness runs).
+  const day = scene.dayNo !== 0 ? scene.dayNo : 1;
+  if (scene.flags & SceneFlag.NORAFT) st.raft = 0;
+  else if (day <= 2) st.raft = 1;
+  else if (day <= 5) st.raft = day - 1;
+  else st.raft = 5;
+  return st;
 }
 
 // ---- dropdown population ----
@@ -788,6 +818,24 @@ async function main() {
         renderer.present(); // restore the normal composite on screen
       }
       return shots;
+    };
+
+    // __digest(n): the FRAME-DIGEST oracle. Same frame-counted run as __trace,
+    // but returns one line per DISPLAYED COMPOSITE describing the composite
+    // STRUCTURE (which layers, in what order, plus island/cloud/zone/holiday
+    // state) instead of draw calls. This is what covers the compositor blind
+    // spot: z-order, layer lifetime and presentation timing, none of which the
+    // draw-call oracle can see. Driven by runForFrames, never the rAF loop, so
+    // it steps by frame and is unaffected by wall-clock pacing.
+    (window as unknown as { __digest: (n: number) => string }).__digest = (n: number) => {
+      const lines: string[] = [];
+      setTraceSink(() => {}); // arms the deterministic RNG (trace text discarded)
+      setDigestSink((l) => lines.push(l));
+      setDigestIsland(digestIslandForScene(adsSelect.value, Number(adsTagSelect.value)));
+      runForFrames(n);
+      setDigestSink(null);
+      setTraceSink(null);
+      return lines.join("\n");
     };
 
     // __schedlog(n): same run as __trace, but returns the SCHEDULER DECISION
