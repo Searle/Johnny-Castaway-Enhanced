@@ -47,6 +47,23 @@ reaches the screen or when.
 before Step 3 (the risky restructure) so the restructure is verifiable rather than
 asserted.
 
+Step 2 is also the only step with a hard **speed** requirement, and for the same
+reason: it has to be cheap enough to run after every edit *during* Step 3, not just
+once at the end. A 6-minute gate gets deferred, and a deferred gate finds bugs after
+they are buried. Budget it like `sweep.py` (~24s for 66 tags × 60 frames, measured),
+not like `pixels.py` (~6 min).
+
+Step 1 is deliberately first and small: it is a contained, obviously-correct fix
+that also removes two workarounds Step 3 would otherwise have to carry forward.
+
+**Accept this about Step 1: no automated check can verify it.** The pixel oracle's
+`presentLayersOnly` deliberately excludes the island and clouds, so it is blind to
+exactly the slot the fix is about, and the digest does not exist yet. Step 1 is
+therefore verified by eye plus "the other oracles did not regress". That is
+acceptable only because the change is small and structural. If Step 1 turns out to
+need real judgement calls, stop and do Step 2 first instead — swapping the order
+costs little and the alternative is another unverified compositor change.
+
 ---
 
 ## Step 1 — Fixed-slot compositor
@@ -89,9 +106,17 @@ fails whenever layer creation order changes, which is why clouds are mostly hidd
    and the cloud-layer recreation block in `stopPlayback` (main.ts:95-100).
    `animateClouds` writes to `renderer.slot("clouds")`.
 
-**Verify.** Clouds visible in front of the ocean and behind Johnny; capture a frame
-where Johnny stands under a cloud and confirm he is drawn over it. Draw-call oracle
-66/66, pixel oracle 53/66 with the same 13 scenes.
+**Verify.** No automated check covers this (see "Order of work"), so be deliberate:
+
+- Capture a frame where a cloud passes over Johnny and confirm **he is drawn over
+  the cloud**, and another where the cloud is over open sea and **visible in front
+  of the ocean**. Both, not just one — the bug is an ordering bug and one image
+  cannot distinguish "above the ocean" from "above Johnny".
+- Confirm clouds survive a scene change *and* a walk (they are slot 2, which
+  outlives slot 4).
+- Confirm a holiday decoration still draws above the scene.
+- Regression: draw-call 66/66, pixel oracle 53/66 with the same 13 scenes and the
+  same pixel counts.
 
 **Note.** `presentLayersOnly()` (pixel-oracle reference format) must keep excluding
 the island and clouds — graphics.go:850 does the same under `traceShots`. Only
@@ -106,11 +131,17 @@ oracle is slow (~6 min), has 13 permanently-failing scenes from GL tie-break
 residue, and **caught none of the five bugs above**. Nothing verifies composite
 structure or presentation timing.
 
+**It must be fast enough to run on every change.** This is a hard requirement, not
+a nice-to-have: an oracle that costs 6 minutes gets run at the end, when a bug is
+already buried under other work. Target: **comparable to `sweep.py`** — all 66 tags
+in well under a minute. That is achievable because the digest is a TEXT oracle; see
+"Why this is fast, and why it does not perturb timing" below.
+
 **Change.** Both engines emit one text line per **presented composite**, diffed like
 `sweep.py`. Proposed format — one line, stable field order, no floats:
 
 ```
-F <n> bg=<SCR|none> isl=<x>,<y>,tide=<hi|lo>,raft=<0-5>,night=<0|1> clouds=<count> zones=<0|1> L=[<slot>:<tag>@<nsprites>,...] hol=<0-4>
+F <n> bg=<SCR|none> isl=<x>,<y>,tide=<hi|lo>,raft=<0-5>,night=<0|1> clouds=<n> zones=<0|1> L=[<slot>:<tag>,...] hol=<0-4>
 ```
 
 Rules:
@@ -119,26 +150,77 @@ Rules:
   composite**, not per traced frame and not per scheduler iteration. This is the
   same alignment rule the pixel oracle already documents in INSIGHTS.md; get it
   wrong and the sequences misalign and every later line differs.
-- `L=[...]` lists live thread layers in composite order with a per-layer sprite
-  count. This is what catches z-order, layer lifetime, and reap-timing bugs.
+- `L=[...]` lists live thread layers **in composite order**, each as
+  `sceneSlot:sceneRootTag`. Order and membership are the payload — that is what
+  catches z-order, layer lifetime and reap-timing bugs. All of it is read straight
+  off `grUpdateDisplay`'s arguments (`TTtmThread.sceneSlot`, `.sceneRootTag`,
+  `.isRunning`, graphics.go:185), so nothing has to be drawn to produce it.
+- **Do NOT include a per-layer sprite count.** No such counter exists on either
+  side (verified), so it would have to be added twice with identical semantics —
+  when to reset it, whether CLEAR_SCREEN zeroes it, whether an off-screen blit
+  counts. That is a new source of divergence unrelated to the bugs this oracle
+  exists to catch, and the draw-call oracle already proves sprite-level equality.
+  Keep this oracle about STRUCTURE (which layers, in what order, when shown).
 - Go side: gate behind a new flag (e.g. `-framedigest`), reusing the
   `-traceserver` stdout protocol so `sweep.py`'s harness is reused wholesale.
-- TS side: `window.__digest(n)` alongside `__trace(n)`, same runner
-  (`runForFrames`).
+- TS side: `window.__digest(n)` alongside `__trace(n)`, driven by the SAME
+  frame-counted runner (`runForFrames`), never by the rAF loop.
+
+### Why this is fast, and why it does not perturb timing
+
+Both existing text oracles already run headless and unpaced; this one inherits that.
+Two distinct kinds of "timing" must not be confused:
+
+- **Wall-clock pacing** — `time.Sleep(frameDelayMS)` (graphics.go:1205) and the
+  frame-hold loop `(end-start) >= grUpdateDelay*0.02` (graphics.go:1228). Both are
+  already short-circuited by `traceEnabled`. This is PRESENTATION timing: it decides
+  when a human sees a frame, and nothing else. Skipping it is what makes `sweep.py`
+  do 66 scenes × 60 frames in **~24s**, measured, at 66/66.
+- **Engine-clock timing** — `mini`, `timer`, `delay`, and the reap step in the ADS
+  main loop. This is LOGICAL timing and must run exactly as normal. It is driven by
+  the tick loop, not by the wall clock, so it is unaffected. INSIGHTS.md states the
+  rule directly: *drop the SLEEP, keep the SUBTRACTION.*
+
+The digest samples state inside the logical loop, so it is blind to wall-clock
+pacing **by construction**. A no-graphics, no-waiting mode is therefore not a risk
+here — it is the established pattern.
+
+**Take a THIRD path through `grUpdateDisplay`**, not `traceShots`':
+
+```
+if digestEnabled { emitDigest(...); return }   // before any compositing
+if traceEnabled && !traceShots { return }      // existing draw-call path
+```
+
+`traceShots` deliberately runs the full letterbox / monitor-rect / GPU blit path
+because the pixel oracle needs real PIXELS (`grCaptureFrame`, graphics.go:1243,
+does `LoadImageFromTexture` + `ExportImage` per frame — that plus base64 transfer of
+~60 full frames per scene is where the pixel oracle's 6 minutes goes, NOT waiting).
+The digest needs only the layer list, available from the arguments at the top of the
+function. So it should skip compositing entirely, like `traceEnabled` does, and end
+up **at least as fast as the draw-call sweep**.
 
 **Implementation notes.**
-- Do NOT reuse the `traceEnabled` early-return in `grUpdateDisplay`
-  (graphics.go:687) — that path skips compositing entirely. Digest mode needs the
-  real composite structure, like `traceShots` does.
 - Keep the digest OUT of the draw-call trace stream. They are separate oracles;
   mixing them breaks 66/66.
 - Add `ts/tools/oracle-diff/digest.py` mirroring `sweep.py` (all 66 tags, poll
   `__ready`, unequal length is a FAILURE not a prefix match).
+- The island/clouds fields are engine-side procedural state the port models
+  separately. If they prove to diverge for reasons unrelated to compositing (e.g.
+  the port's cloud RNG differs), drop those fields rather than weakening the
+  oracle — `L=[...]` and the frame count are the load-bearing part.
 
-**Verify.** Canary-test the harness before trusting it (INSIGHTS rule 1): confirm it
-FAILS when clouds are moved to the wrong slot, when a scene's final frame is
-dropped, and when a layer is reaped one iteration early. A digest oracle that passes
-those three is trustworthy; one that only reports 66/66 is not.
+**Verify — canary FIRST, before trusting a single green run** (INSIGHTS rule 1, and
+the corollary that a probe reporting "no problem" is worthless until seen reporting
+one). Introduce each of these deliberately and confirm the oracle FAILS:
+
+1. clouds composited in the wrong slot (the bug no check caught);
+2. a scene's final frame dropped (present after the reap instead of before);
+3. a layer reaped one iteration early;
+4. an extra present on an iteration where nothing drew.
+
+If any of those still reports green, the oracle is broken — fix it before relying
+on it. Record the four results in the commit message.
 
 **Then.** Retire `pixels.py` to an occasional spot-check. Keep it — it is the only
 thing that validates primitive rasterization — but it stops being a gate.
@@ -206,9 +288,15 @@ synchronously — drive it from an explicit step function, not from raw `await` 
 timers. If `?dump` mode cannot pump the coroutine, keep `?dump` on the existing
 direct-tick path and let only interactive playback use the coroutine.
 
-**Verify.** All oracles green (draw-call 66/66, digest, story-check, walk 1792/1792)
-**plus** a long unattended run: no wedge, no blink, no teleport, waves and clouds
-animating throughout, scene count decrementing by exactly one per beat.
+**Verify.** Run the digest oracle after **every** edit, not just at the end — that
+is what Step 2's speed budget bought. On completion: all oracles green (draw-call
+66/66, digest, story-check, walk 1792/1792) **plus** a long unattended run: no
+wedge, no blink, no teleport, waves and clouds animating throughout, scene count
+decrementing by exactly one per beat.
+
+The digest cannot see everything either. It has no opinion on *pixels* (that is the
+draw-call and pixel oracles) and none on wall-clock pacing — a build that plays at
+8x speed passes it. Watch the real thing before calling Step 3 done.
 
 ---
 
@@ -231,6 +319,12 @@ complexity one flag at a time, re-running the digest oracle after each:
 
 - **Do not start Step 3 before Step 2 is green and canary-tested.** The restructure
   is unverifiable without it.
+- **No text oracle can see wall-clock pacing.** All of them (draw-call, digest,
+  schedlog) step by frame with pacing disabled, so a build running at 8x speed
+  passes every one. That exact bug has happened here — charging 1 tick instead of
+  `mini` per iteration. Step 3 rewrites the loop that owns pacing, so after it,
+  time a known scene against the Go engine on the wall clock, or watch it. One
+  measurement, but it must be taken.
 - **One step per commit.** Each commit states which oracles ran and their numbers.
 - **Never delete a flag without first proving it is not load-bearing** — flip it,
   observe the failure, then decide. Three root-cause stories in this repo's history
