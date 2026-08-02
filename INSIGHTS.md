@@ -5,18 +5,17 @@ changelog — only things that will save time or prevent repeating mistakes.
 
 **Current state of the TS port (branch `ts`):** the scene viewer and screensaver
 mode both run — story scene selection, walk transitions, procedural island
-(tide/raft/night/holidays/VARPOS), and sound. The ported ALGORITHMS are verified
-correct by the oracles below. The DRIVER that glues them together is not: it is
-an event-driven state machine where the engine is a blocking loop, and that
-mismatch is where every human-reported bug has come from. **Before adding
-features, read `RESTRUCTURE-PLAN.md`** — it diagnoses this and gives the
-step-by-step fix (fixed-slot compositor → frame-digest oracle → coroutine driver
-→ flag removal). Doing more feature work on the current structure will keep
-producing the same class of bug.
+(tide/raft/night/holidays/VARPOS), and sound. The four-step restructure in
+`RESTRUCTURE-PLAN.md` is COMPLETE: the compositor uses fixed slots, the driver is
+a coroutine that mirrors `storyPlay`'s statement order, and every oracle is
+green. Remaining work is listed at the end of that file — start there.
+
+The driver is now 169 lines against the engine's 265, having been 955. If it
+starts growing again, or a fix wants a new flag, re-read method rules 6 and 7.
 
 ## How to work on this repo (read this first)
 
-Seven rules, each learned the expensive way. They are about METHOD, not about the
+Nine rules, each learned the expensive way. They are about METHOD, not about the
 engine, and they generalise past the parts of the codebase that produced them.
 
 1. **Distrust a good score before you trust the code.** A lenient comparison
@@ -58,6 +57,21 @@ engine, and they generalise past the parts of the codebase that produced them.
    compensating for a structural mismatch — fix the structure. `prevSpot` being
    cleared on FINAL scenes (a port invention with no engine equivalent) made
    Johnny teleport across the island.
+
+8. **Distrust a BAD score too — check the instrument before "fixing" the code.**
+   Rule 1's mirror image. The last "failing" digest scene was the ORACLE
+   reporting raw array order where the compositor makes two passes; the port had
+   been right all along. Before changing code to satisfy a check, confirm the
+   check measures what it claims. Its own comment can lie: that one said
+   "emitted in composite order" above code that did no such thing.
+9. **Match the probe to the QUESTION, not to the subsystem.** Two leaks across
+   the same scene switch needed two different instruments, and neither would
+   have found the other. A state FINGERPRINT (snapshot everything, diff warm vs
+   cold) found stale statics — a value that was wrong. A warm-vs-cold DIGEST
+   diff found a surviving compositor slot — state that was *present but should
+   not be*, which no snapshot comparison can see, because both runs looked
+   identical at the moment of sampling. Ask "what would this probe be blind to?"
+   before building it.
 
 Corollary for the human-facing side: **the oracles cannot see everything.** Every
 screensaver-era bug was reported by a person looking at the screen while both
@@ -189,12 +203,28 @@ newest and then demands an uncached browser build, and the sweep dies at launch.
 | Walk animation | `npm run walk-check` | **1792/1792** | ~10s |
 | Story logic | `npm run story-check` | pass | ~2s |
 | Cloud/slot order | `uv run --with playwright==1.61.0 python tools/oracle-diff/cloudorder.py 45` | pass | ~50s |
+| Screensaver (live) | `uv run --with playwright==1.61.0 python tools/oracle-diff/screensaver.py 90` | pass | ~90s |
+| Scene edges | `uv run --with playwright==1.61.0 python tools/oracle-diff/sceneedge.py 90` | pass | ~90s |
+| Teleport / island anim | `uv run --with playwright==1.61.0 python tools/oracle-diff/teleport.py 150` | pass | ~150s |
+| __load leak | `uv run --with playwright==1.61.0 python tools/oracle-diff/leakcheck.py 20` | pass | ~2m |
+
+The last four drive the REAL screensaver and cover what no text oracle can: the
+text oracles all step by frame with wall-clock pacing disabled and drive a
+single ADS tag, so a build running at 8x speed passes every one of them.
+`screensaver.py` asserts on PACING for exactly that reason (measured normal:
+~4-6 engine frames/sec; charging 1 tick instead of `mini` reads ~24).
+`sceneedge.py` watches the walk->scene handover, which `screensaver.py` is blind
+to — its blink test needs every scene layer empty at once AND a single blank
+between two full composites, and the real defect produced two consecutive
+blanks.
 
 The **frame digest** (`digest.py`, Go side `-framedigest`) is the compositor
 gate added by RESTRUCTURE-PLAN Step 2: one line per DISPLAYED COMPOSITE,
 reporting which thread layers composite and in what order. It is what finally
-covers layer lifetime and presentation timing. See "the frame digest" below for
-its 19 known-failing scenes — they are ONE root cause, not nineteen.
+covers layer lifetime and presentation timing, and it is fast enough (~27s for
+all 66 tags, headless) to run after every edit rather than at the end. See "the
+frame digest" below for what it can and cannot see — its `KNOWN_FAILING` set is
+empty; never grow it to make a run green.
 
 `walk-check` diffs the walk state machine frame-for-frame against a Go reference
 over every spot pair and start/end heading. **Caveat:** that reference
@@ -326,6 +356,36 @@ These are the ones a re-implementation gets wrong by default.
   `adsPlay` again — re-entry must NOT re-seed the RNG. The loop's exit condition
   is ads.go's own `numThreads != 0`, not "an END opcode ran".
 
+### The coroutine driver — the rules that keep it correct
+
+`main.ts`'s `storyPlay` mirrors `story.go`: sequencing is STATEMENT ORDER, not
+flags. It is an async GENERATOR because the frame-dump harness drives the engine
+synchronously, one displayed frame at a time — `pumpStory()` advances it by
+exactly one step. A plain `async`/`await` driver would tie playback to promise
+scheduling and break `?dump`.
+
+Four things are load-bearing; each was a visible bug when got wrong:
+
+- **`adsInitIsland` runs once per SCENE, not per `adsPlay`.** The engine loops
+  `adsPlay` for a script that ran dry, and the island metronomes keep their
+  phase across that. `AdsScheduler.start()` re-inits them; `restart()`
+  deliberately does not. Re-arming mid-scene shifts `mini`, and since one `mini`
+  is one composite, it changes the composite count for the rest of the scene.
+- **Saved zones are PER-SCENE.** Within a scene only `LOAD_SCREEN` /
+  `RESTORE_ZONE` release them; a NEW scene starts with none, because
+  `islandInit`'s `grLoadScreen` calls `grReleaseSavedLayer`. `resetLayers()`
+  must NOT clear them (it is per-thread), so the per-scene release is explicit.
+- **Never present with an empty stage.** `playScene` loads the ADS BEFORE
+  tearing down the previous scene, and does not `present()` after `start()` —
+  `start()` calls `resetLayers()`, so compositing there shows nothing. The
+  engine only calls `grUpdateDisplay` INSIDE the main loop, after threads run.
+  Both mistakes read as "Johnny disappears for a frame" at a scene change.
+- **`keepBackground` is load-bearing and stays.** Re-tested after the fixed-slot
+  compositor landed: disabled, 74/74 samples show a black strip below y=400,
+  because a scene's `ISLETEMP.SCR` (640x350) replaces the island's full-height
+  ocean backdrop. Slots fixed Z-ORDER; they cannot fix which BITMAP is
+  installed.
+
 ### 1px primitives rasterize differently in GL and Canvas
 
 Four separate traps, all found by the pixel oracle:
@@ -456,13 +516,18 @@ four deliberate bugs the digest must catch:
 | a layer reaped one iteration early | caught (93→104) |
 | an extra present on a no-draw iteration | caught (93→128) |
 | **clouds composited in the wrong slot** | **NOT caught** |
+| disabling the always-on-top pass (added later) | caught — WALKSTUF:1 goes red |
 
-The last one slips through *by construction*: `L=[...]` lists scene threads, and
+The CLOUDS one slips through *by construction*: `L=[...]` lists scene threads, and
 clouds are a fixed slot that never appears in it. Three baseline-passing scenes
 stayed green with clouds deliberately blitted above every scene layer. **So the
 plan's premise that Step 2 makes Step 1 verifiable is wrong** — the digest and
 the compositor slots barely intersect. Slot order is covered by `cloudorder.py`
 instead (below). Run both.
+
+The fifth line was added once `emitDigest` reported TRUE composite order (the
+engine makes two passes when an always-on-top thread is present). So `L=[...]`
+does verify SCENE-LAYER z-order — it is only the FIXED slots it cannot see.
 
 ### cloudorder.py — the only check that sees SLOT ORDER
 
@@ -553,7 +618,9 @@ Both oracles check what the interpreter *computes*; neither can see z-order,
 layer lifetime, or when a frame is shown. Every screensaver-era bug lived in that
 blind spot — a wedged render loop, frozen island animation, a one-frame blank
 after a reap, and clouds composited in the wrong slot (which went unnoticed
-entirely). The fix is a per-frame text digest emitted by both engines and diffed
+entirely). FIXED: that is the frame digest, now at 66/66; the remaining gap is
+FIXED-slot order, which only `cloudorder.py` sees. Historical note — the fix was
+a per-frame text digest emitted by both engines and diffed
 like `sweep.py`; design is in `RESTRUCTURE-PLAN.md` Step 2. The pixel oracle is
 NOT a substitute: it is slow (~6 min), carries 13 permanently-failing scenes, and
 caught none of them.

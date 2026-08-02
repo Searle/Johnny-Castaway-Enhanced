@@ -1,6 +1,27 @@
-# Restructure plan
+# Restructure plan — DONE. Remaining work at the bottom.
 
-Read `INSIGHTS.md` first — especially the five method rules. This plan assumes them.
+**All four steps are complete and every oracle is green** (draw-call 66/66,
+frame digest 66/66, walk 1792/1792, story-check, plus four live-screensaver
+probes). The driver is 169 lines against the engine's 265, having been 955.
+
+The step-by-step plan below is kept for its REASONING — the diagnosis of why a
+flag-based driver kept producing the same class of bug is still the best
+argument against reintroducing one. Skip to **"What is left"** at the end for
+actual work. Read `INSIGHTS.md` first; the nine method rules there are what made
+this tractable.
+
+Two of the plan's own assumptions turned out to be WRONG, recorded here so they
+are not re-adopted:
+
+- **Step 2 does not make Step 1 verifiable.** The frame digest reports
+  `L=[...]`, the scene threads; the clouds are a fixed slot that never appears
+  there. Three baseline-passing scenes stayed green with clouds deliberately
+  composited above every scene layer. Slot order needs `cloudorder.py`, which
+  reads the slots directly.
+- **Step 3 did not fix the digest failures**, because they lived in
+  `scheduler.ts`'s metronome handling, not in the driver Step 3 rewrote.
+
+---
 
 ## Diagnosis
 
@@ -333,3 +354,38 @@ complexity one flag at a time, re-running the digest oracle after each:
   was found by a human watching the screen while both sweeps read green.
 - Keep `git status` clean of diagnostic patches; revert instrumentation before
   committing.
+
+---
+
+## What is left
+
+Nothing is blocking, and nothing here is known to be visibly wrong. In rough
+order of value:
+
+1. **`johnnyIdx` compositing pass (unported).** `grUpdateDisplay` has a THIRD
+   ordering rule after always-on-top: when a Johnny thread is present, threads
+   are blitted flipped-first / Johnny / non-flipped-last, so planes pass BEHIND
+   him flying right-to-left and IN FRONT going left-to-right (`johnnyThreadTags`
+   in ads.go, BUILDING.ADS:1:48-56). The port does not implement it, and
+   `emitDigest` deliberately does NOT mirror it either — reporting an ordering
+   the port cannot produce would be a divergence the digest cannot act on. If
+   you port it, mirror it in `emitDigest` at the same time, and the digest will
+   then verify it.
+2. **Freeze-on-stop decorations (unported).** `stopFreezeExceptions` in ads.go.
+3. **Intro and fades.** `adsPlayIntro`, `grFadeIn`/`grFadeOut` are in
+   `storyPlay` but not in the port's coroutine.
+4. **Sound is outside oracle coverage entirely.** `PLAY_SAMPLE` is untraced on
+   BOTH sides by design — adding a trace line to one side alone desynchronises
+   every scene. Closing it means adding it to both.
+5. **13 pixel differences — deliberate stopping point.** GL vs Canvas
+   rasterization (raylib's circle fan segment count; GL's diamond-exit rule on
+   diagonals, which is sub-pixel dependent and inconsistent between two lines in
+   the same Go frame). The draw-call trace already proves both engines request
+   identical geometry, so matching these means emulating raylib, not verifying
+   the port. `pixels.py` is a spot-check, not a gate.
+
+**What the oracles still cannot see**, so it stays a human job: wall-clock feel
+beyond `screensaver.py`'s pacing assertion, sound, and episode-scale behaviour
+over hours. Every oracle drives ONE ADS tag with pacing disabled. Three times in
+one session a human watching the screen found something a fully green suite did
+not. Run it and look at it.
