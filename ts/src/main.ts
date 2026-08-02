@@ -393,6 +393,11 @@ function advanceStory(): void {
   if (newEpisode) {
     story.queue = story.driver.buildEpisode();
     applyIslandOverrides();
+    // storyPlay resets prevSpot to -1 at the top of each episode: the island is
+    // rebuilt (possibly at a new position, tide and raft stage) and there is no
+    // continuity with wherever the last episode left Johnny standing.
+    story.prevSpot = null;
+    story.prevHdg = 0;
   }
   const next = story.queue.shift() ?? null;
   story.current = next;
@@ -582,6 +587,12 @@ async function main() {
     if (!story) return;
     story.walk = null;
     story.advancing = false;
+    // Carry the spot over as a natural scene end would, otherwise skipping a
+    // beat leaves prevSpot stale and every subsequent walk is skipped.
+    if (story.current) {
+      story.prevSpot = story.current.spotEnd;
+      story.prevHdg = story.current.hdgEnd;
+    }
     advanceStory();
   });
 
@@ -891,15 +902,16 @@ async function main() {
           if (story) {
             if (frames === 0) break; // nothing played yet: let it start before advancing
             // Remember where this beat left Johnny so the next walk starts
-            // there. Scenes with no end spot (spotEnd/hdgEnd 0 on a FINAL
-            // scene) leave it alone — storyPlay only tracks prevSpot for the
-            // non-final scenes it chains.
+            // there. storyPlay does this unconditionally after every scene
+            // (`prevSpot = scene.spotEnd`) and resets to -1 only once per
+            // EPISODE, so the carry-over must survive a FINAL scene too —
+            // an earlier version cleared it on FINAL, which skipped the walk
+            // into the next episode's first scene entirely (Johnny teleporting
+            // from fishing on the right to building on the left).
             const done = story.current;
-            if (done && (done.flags & SceneFlag.FINAL) === 0) {
+            if (done) {
               story.prevSpot = done.spotEnd;
               story.prevHdg = done.hdgEnd;
-            } else {
-              story.prevSpot = null; // a FINAL scene ends the episode: no carry-over
             }
             advanceStory();
             break;
