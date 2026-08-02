@@ -462,12 +462,18 @@ async function* playScene(scene: StoryScene): AsyncGenerator<StoryStep, void, vo
     hud.textContent = `story: missing ${scene.adsName}`;
     return;
   }
-  scheduler = null;
-  renderer.resetLayers();
+  // Load FIRST, and only tear the old scene down once the replacement is in
+  // hand. Wiping the layers before the await left the stage empty for the whole
+  // asset load, and the pump presents every iteration — so the end of every walk
+  // showed two blank composites before the next scene drew. The engine has no
+  // such gap: adsPlayWalk returns and adsPlay begins with nothing presented in
+  // between. Measured at every walk->scene edge: [.., 529, 508, 0, 0, 529, ..].
   const load = loadAds(ANIM_ROOT, entry.dir);
   yield "load";
   const { ads, slots } = await load;
   if (!story) return;
+  scheduler = null;
+  renderer.resetLayers();
 
   const sched = new AdsScheduler(ads, slots, renderer, {
     // With a REAL island we honour the engine's positioning:
@@ -488,7 +494,12 @@ async function* playScene(scene: StoryScene): AsyncGenerator<StoryStep, void, vo
   sched.start(scene.adsTag);
   scheduler = sched;
   frames = 0;
-  renderer.present();
+  // Deliberately NO present() here. start() calls resetLayers(), so compositing
+  // at this point shows an empty stage — the scene has not run a frame yet. The
+  // engine's adsPlay only ever calls grUpdateDisplay INSIDE its main loop,
+  // after the threads have run, so it never displays that moment. Presenting
+  // here put one blank composite at the start of every beat, which reads as
+  // Johnny disappearing for a frame at the scene change.
   markReady();
 
   // Tick until the script drains. A beat that ends via END is just as finished
