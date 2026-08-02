@@ -840,7 +840,17 @@ async function main() {
       // and TIMER draws use the seeded RNG. The initial start() at page load ran
       // before the sink was set (using Math.random) — that made the first trace
       // differ from later ones. (TTM single-scene mode has no ADS RNG to reseed.)
-      if (scheduler) scheduler.restart();
+      //
+      // start(), NOT restart(): this is the harness's FRESH-SCENE point, the
+      // equivalent of the Go server's adsInit() + setupSceneForTrace() before
+      // its `for !traceReachedBudget { adsPlay(...) }` loop, so the island
+      // metronomes are re-initialised here. restart() deliberately does not do
+      // that (it is adsPlay re-entry within one scene), and using it here let
+      // metronome phase leak from one swept scene into the next via the
+      // in-page __load path — 18 scenes passed on COLD_RELOAD=1 and failed in
+      // the normal sweep, which is exactly the "__load must stay equivalent to
+      // a cold reload" invariant in INSIGHTS.md.
+      if (scheduler) scheduler.start(scheduler.currentEntryTag);
       let guard = 1_000_000;
       let framesAtPassStart = 0; // frames emitted before the current adsPlay pass
       while (!TtmThread.traceReachedBudget && guard-- > 0) {

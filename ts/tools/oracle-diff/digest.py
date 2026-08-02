@@ -55,37 +55,36 @@ import json, os, sys, subprocess, difflib
 import functools
 print = functools.partial(print, flush=True)  # observable in background runs
 
-# Scenes that diverge at the time this oracle landed (RESTRUCTURE-PLAN Step 2).
-# ONE root cause, not 19: the port's background metronome drifts out of phase
-# with the engine's, so `mini` differs and — since each `mini` is one loop
-# iteration and therefore one composite — the composite COUNT diverges for the
-# rest of the scene. Draw calls are unaffected; the sweep reads 66/66 on these
-# same scenes, which is exactly the blind spot this oracle exists to cover.
+# Scenes that still diverge.
 #
-# LOCALISED (Step 4), but not yet fixed. On STAND:2 both engines agree for 247
-# schedlog lines and then split on the metronome alone, with scene-thread state
-# identical (`{1=1:35 r1 t6 d10 st0}`):
-#     engine  bg=5 -> mini 4 -> bg=1   then mini 1,5,3,7
-#     port    bg=8 -> mini 4 -> bg=4   then mini 4,2,4,2
-# The port re-arms bg to 8 where the engine still holds 5. Two hypotheses were
-# TESTED AND REJECTED, both making it worse (546 lines differing instead of a
-# 1-7 length delta), so neither is the answer:
-#   - modelling islandAnimateClouds' isRunning=0 stop (island.go:224) for
-#     zero-cloud episodes: no measurable effect;
-#   - moving the metronome reset out of start() so restart() preserves phase:
-#     wrong, because adsInit() DOES reset them per scene in -traceserver.
-# The remaining suspect is WHEN the port re-arms (`<= 0` before the scene
-# threads run) versus the engine's `== 0` guard combined with islandAnimate
-# actually running on that tick. Measure before changing.
+# WALKSTUF:1 is the only genuine one left. The other 18 (MARY:5, MISCGAG:1/2 and
+# every STAND) were ONE bug, fixed in scheduler.ts: restart() — adsPlay
+# re-entry for a script that ran dry — was re-initialising the island
+# metronomes, which adsInitIsland only ever does ONCE per scene, before the
+# engine's `for !traceReachedBudget { adsPlay(...) }` loop. Resetting bg to 8
+# mid-scene put it half a period out of step, which changed `mini` and therefore
+# the composite count for the rest of the run. Localised by logging the re-arm
+# DECISION on both sides: the sequences were identical for 69 events, then the
+# engine read bg=5 where the port read bg=8. With the fix the schedlogs match
+# exactly, 475 = 475 lines with zero differences.
 #
-# Listed so a run can distinguish "expected" from "NEW REGRESSION"; never grow
-# this list to make a run green.
+# KNOWN HARNESS ISSUE — run with COLD_RELOAD=1 for a true reading. Those 18 pass
+# on a cold reload and still fail in the normal in-page sweep, so state leaks
+# across window.__load in a way it did not before. Neither side leaks in
+# isolation (STAND:2 gives 270 composites alone, and 270 after another scene on
+# the persistent Go server; the port's first-scene and post-__load schedlogs are
+# byte-identical), and the first 30 swept scenes pass, so it is cumulative and
+# not yet located. INSIGHTS.md's "__load must stay equivalent to a cold reload"
+# invariant is the thing to re-establish.
+#
+# Never grow this list to make a run green.
 KNOWN_FAILING = {
+    ("WALKSTUF", 1),
+    # Pass on COLD_RELOAD=1; fail in the in-page sweep only (see above).
     ("MARY", 5), ("MISCGAG", 1), ("MISCGAG", 2),
     ("STAND", 1), ("STAND", 2), ("STAND", 3), ("STAND", 4), ("STAND", 5),
     ("STAND", 6), ("STAND", 7), ("STAND", 8), ("STAND", 9), ("STAND", 10),
     ("STAND", 11), ("STAND", 12), ("STAND", 14), ("STAND", 15), ("STAND", 16),
-    ("WALKSTUF", 1),
 }
 
 HERE = os.path.dirname(__file__)

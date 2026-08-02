@@ -221,6 +221,13 @@ export class AdsScheduler {
 
   private entryTag = 0;
 
+  // The tag start() was last called with, so the harness can re-enter a scene
+  // FRESH (island metronomes re-initialised) rather than via restart(), which
+  // is adsPlay re-entry and deliberately preserves them.
+  get currentEntryTag(): number {
+    return this.entryTag;
+  }
+
   // restart re-runs from the same entry tag (used by the trace harness to get a
   // clean, seeded run after arming the trace sink — the initial start() at page
   // load happened before the sink/deterministic RNG were set).
@@ -234,21 +241,32 @@ export class AdsScheduler {
   // carry on across passes, which is what keeps the second pass's RANDOM picks
   // matching the oracle's.
   restart(): void {
-    this.start(this.entryTag);
+    this.start(this.entryTag, false);
   }
 
   // start runs the ADS chunk at the given entry tag (adsPlay → adsPlayChunk).
-  start(entryTag: number): void {
+  start(entryTag: number, initIsland = true): void {
     this.entryTag = entryTag;
     this.renderer.resetLayers();
     this.threads = new Array(MAX_THREADS).fill(null);
     this.stopped = false;
     // adsInitIsland state (see the field comments): background delay/timer are
     // 40/0 initially but islandInit overrides both to 8; clouds are 8/0.
-    this.bgDelay = 8;
-    this.bgTimer = 8;
-    this.cloudsDelay = 8;
-    this.cloudsTimer = 0;
+    //
+    // Applied only when this is a FRESH scene. adsInitIsland runs ONCE, in
+    // setupSceneForTrace/storyPlay, BEFORE the `for !traceReachedBudget {
+    // adsPlay(...) }` loop — so re-entering adsPlay (restart(), for a script
+    // that ran dry) must NOT re-init the island, and the metronomes keep their
+    // phase across it. Resetting bg to 8 there put it half a period out of step
+    // with the engine, which changed `mini` and therefore the composite count
+    // for the rest of the scene: measured on STAND:2, engine bg=5 -> mini 3,4,1
+    // where the port read bg=8 -> mini 3,4,4.
+    if (initIsland) {
+      this.bgDelay = 8;
+      this.bgTimer = 8;
+      this.cloudsDelay = 8;
+      this.cloudsTimer = 0;
+    }
     this.localChunks = []; // adsLoad resets numAdsChunksLocal
     this.registerChunks(entryTag);
     const ip = this.findTag(entryTag);
