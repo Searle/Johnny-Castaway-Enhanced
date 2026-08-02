@@ -862,7 +862,17 @@ async function main() {
         // waves update invisibly on the background layer and the shore appears
         // frozen for the whole hold (STAND's idle poses, which draw once and
         // then sit for tens of seconds).
-        if (animateIsland(tickCost)) renderer.present();
+        //
+        // Only when the tick did NOT already composite and did NOT reap. A reap
+        // frees the finished thread's layer AFTER onPresent has shown that
+        // scene's last frame, so presenting again here re-composites the same
+        // moment with the layer gone — a blank or half-empty frame, i.e. Johnny
+        // vanishing for one frame at a scene change. Measured: presents with 0
+        // layers, and 2→1 layer drops, exactly on transitions.
+        const islandChanged = animateIsland(tickCost);
+        if (islandChanged && !scheduler.lastTickPresented && !scheduler.lastTickReaped) {
+          renderer.present();
+        }
         // The script ran dry: re-enter the entry tag, exactly as the engine's
         // `for !shouldExitApp { adsPlay(...) }` does (main.go) — adsPlay returns
         // as soon as no thread is left running, and some tags legitimately run

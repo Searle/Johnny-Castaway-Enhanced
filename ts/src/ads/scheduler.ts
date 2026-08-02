@@ -551,6 +551,16 @@ export class AdsScheduler {
     return Math.max(1, this.lastTickUnits);
   }
 
+  // Whether the last tick() composited (a thread drew), and whether it reaped a
+  // finished thread. A caller that wants to present for its OWN reasons — story
+  // mode compositing the island's wave/cloud animation — must not do so on a
+  // tick that reaped: onPresent already showed the scene's final frame BEFORE
+  // grFreeLayer, and re-presenting afterwards shows the same iteration again
+  // with that layer gone. That blank instant between a reap and the next
+  // scene's first draw is exactly what ads.go never displays.
+  lastTickPresented = false;
+  lastTickReaped = false;
+
   // Called at ads.go's grUpdateDisplay point inside tick() — see step 2 there.
   // The caller composites here rather than after tick() returns, so a scene's
   // last frame is shown before its layer is freed by the reap.
@@ -597,6 +607,7 @@ export class AdsScheduler {
     // draw-call trace is identical either way, which is why the oracle can't
     // catch this.
     if (changed) this.onPresent?.();
+    this.lastTickPresented = changed;
 
     // The trace's frame budget stops the run right after the frame is emitted —
     // ads.go returns from adsPlay on traceReachedBudget, BEFORE the mini/reap
@@ -627,6 +638,7 @@ export class AdsScheduler {
 
     // 5. Post-step processing for threads whose timer has now elapsed.
     let membershipChanged = false;
+    this.lastTickReaped = false;
     for (let i = 0; i < this.threads.length; i++) {
       const s = this.threads[i];
       if (!s || s.thread.timer > 0) continue;
@@ -661,6 +673,7 @@ export class AdsScheduler {
       this.renderer.removeLayer(s.thread.layerRef); // adsStopScene → grFreeLayer
       this.threads[i] = null;
       membershipChanged = true;
+      this.lastTickReaped = true;
       if (!this.stopped) {
         schedLog(`FIRE ${s.slot}:${s.rootTag}`);
         this.fireTriggeredChunks(s.slot, s.rootTag);
