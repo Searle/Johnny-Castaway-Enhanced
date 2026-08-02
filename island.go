@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"math/rand"
 )
 
 var (
@@ -45,7 +44,7 @@ func islandInit(ttmThread *TTtmThread) {
 	if islandState.night != 0 {
 		grLoadScreen("NIGHT.SCR")
 	} else {
-		scrName := fmt.Sprintf("OCEAN0%d.SCR", rand.Int()%3)
+		scrName := fmt.Sprintf("OCEAN0%d.SCR", islandRand(3))
 		grLoadScreen(scrName)
 	}
 
@@ -98,27 +97,27 @@ func islandInit(ttmThread *TTtmThread) {
 	cloudX := uint16(0)
 	cloudY := uint16(0)
 
-	numClouds := int32(rand.Int() % 6)
-	windDirection := int32(rand.Int() % 2)
+	numClouds := int32(islandRand(6))
+	windDirection := int32(islandRand(2))
 
 	islandState.clouds.numClouds = numClouds
 	islandState.clouds.windDirection = windDirection
 
 	for i := range numClouds {
-		cloudNo := rand.Int() % 3
+		cloudNo := islandRand(3)
 		switch cloudNo {
 		case 0:
-			cloudX = uint16(rand.Int() % (virtualWidth - 129))
-			cloudY = uint16(rand.Int()%(100-36) + 25)
+			cloudX = uint16(islandRand(virtualWidth - 129))
+			cloudY = uint16(islandRand(100-36) + 25)
 
 		case 1:
-			cloudX = uint16(rand.Int() % (virtualWidth - 192))
-			cloudY = uint16(rand.Int()%(100-57) + 25)
+			cloudX = uint16(islandRand(virtualWidth - 192))
+			cloudY = uint16(islandRand(100-57) + 25)
 		case 2:
-			cloudX = uint16(rand.Int() % (virtualWidth - 264))
-			cloudY = uint16(rand.Int()%(100-76) + 25)
+			cloudX = uint16(islandRand(virtualWidth - 264))
+			cloudY = uint16(islandRand(100-76) + 25)
 		}
-		islandState.clouds.windSpeed[i] = int32(rand.Int()%2 + 1)
+		islandState.clouds.windSpeed[i] = int32(islandRand(2) + 1)
 		islandState.clouds.cloudNo[i] = int32(cloudNo)
 		islandState.clouds.xPos[i] = int32(cloudX)
 		islandState.clouds.yPos[i] = int32(cloudY)

@@ -385,18 +385,42 @@ Two harness rules learned here, both of which silently corrupted results:
 ### The frame digest — what it caught, and what it cannot see
 
 `digest.py` emits one line per composite:
-`F <n> raft=.. night=.. zones=.. L=[<slot>:<tag>,...] hol=..`. `L=[...]` is the
-payload — which thread layers composite, in what order — and the line's position
-in the sequence is WHEN. 27s for all 66 tags, headless.
+`F <n> isl=<x>,<y> tide=.. raft=.. night=.. clouds=.. zones=.. L=[<slot>:<tag>,...] hol=..`.
+`L=[...]` is the payload — which thread layers composite, in what order — and the
+line's position in the sequence is WHEN. 27s for all 66 tags, headless.
 
-**Fields deliberately absent, because they are nondeterministic on the GO side
-alone.** Measured, not assumed: ten identical `STAND 2` runs gave 4 `tide=hi` /
-6 `tide=lo`; the cloud count varied 4/1/2; the backdrop varied
-`OCEAN02`/`OCEAN01`. All come from the UNSEEDED global `rand` (`islandInit`,
-`storyCalculateIslandFromScene`). Even the cloud *boolean* inherits it, since
-`islandAnimateClouds` sets `isRunning = 0` when `numClouds == 0`. **The first
-four runs agreed before the flake showed up** — sample properly before trusting
-a field, and prefer dropping one over weakening the comparison.
+**Every field is DETERMINISTIC, via a THIRD seeded RNG stream.** The island's
+procedural state originally read the UNSEEDED global `rand`, which made the Go
+engine disagree with ITSELF run to run: ten identical `STAND 2` runs gave 4
+`tide=hi` / 6 `tide=lo`, cloud counts 4/1/2, backdrop `OCEAN02`/`OCEAN01`. The
+first FOUR runs agreed before the flake appeared — sample 15-20 times before
+trusting a field. Those fields were briefly dropped from the format, which was
+the wrong fix: it left the oracle blind to all island state. The right fix was
+`traceRngIsland` / `islandRand` (Go) and `randIsland` (TS), re-seeded per scene
+by `traceResetForScene`, isolated from the ADS and TIMER streams for the same
+reason those two are isolated from each other. Now 20/20 identical runs across
+seven scenes, including VARPOS position and tide.
+
+Two constraints that make the island stream work, both easy to break:
+
+- **Draw count and order must match on both sides.** Go's `&&` short-circuits,
+  so a scene without `LOWTIDE_OK` performs NO tide draw at all; the VARPOS block
+  does 1-3 coin flips plus 2 range draws depending on branch. `__digest`
+  therefore calls the REAL `Story.calculateIslandFromScene` instead of
+  reimplementing the ladder — a hand-rolled copy would drift the moment either
+  branch changed.
+- **Only the oracles are deterministic.** Outside trace mode both engines fall
+  through to the normal random, so real playback keeps its run-to-run variety.
+
+**The backdrop NAME is still excluded, for a different reason.** It is
+deterministic now, but it measures "who last called `LOAD_SCREEN`" — and the two
+architectures answer that differently BY DESIGN. In the engine the island
+installs the backdrop (island.go:45/48, `NIGHT.SCR` / `OCEAN0n.SCR`); the port
+keeps a baked `ISLETEMP.SCR` and suppresses the scene's own load via
+`TtmThread.keepBackground`. Both are correct; comparing the name would encode a
+false equivalence. Everything the choice DEPENDS on — night, tide, position — is
+reported directly instead. Verified: with `bg` normalised away, MARY:1 was
+byte-identical 69/69 lines before the field was removed.
 
 **19 of 66 fail, and it is ONE bug.** 14 are STAND; most differ by ±1..7
 composites. Root-caused via `JC_SCHED_LOG` (the decision-sequence diff, as

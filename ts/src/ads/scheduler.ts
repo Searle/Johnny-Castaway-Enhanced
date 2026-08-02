@@ -99,6 +99,9 @@ export interface DigestIslandState {
   raft: number;
   night: boolean;
   holiday: number;
+  lowTide: boolean;
+  xPos: number;
+  yPos: number;
 }
 let digestIsland: DigestIslandState | null = null;
 export function setDigestIsland(st: DigestIslandState | null): void {
@@ -736,12 +739,16 @@ export class AdsScheduler {
   private emitDigest(): void {
     if (!digestSink) return;
     const st = digestIsland;
+    const tide = st?.lowTide ? "lo" : "hi";
     const zones = this.renderer.hasSlot("savedZones") ? 1 : 0;
-    // The holiday slot only counts while its thread runs, matching the engine's
-    // `isRunning != 0` guard. Reported as a boolean, not the decoration id: the
-    // id is fine, but keeping every field a running/present FACT rather than a
-    // random value is what makes this oracle deterministic (see trace.go).
-    const hol = st && st.holiday !== 0 ? 1 : 0;
+    // clouds/holiday count only while their thread runs (the engine's
+    // `isRunning != 0` guard on those slots). On the digest path the ADS viewer
+    // builds no island, so the cloud thread never starts and the count is 0 —
+    // which is exactly what the Go side reports there, checked per scene rather
+    // than assumed. If story mode ever drives the digest, this needs the real
+    // cloud count threaded through DigestIslandState.
+    const clouds = 0;
+    const hol = st ? st.holiday : 0;
     // COMPOSITE order, not raw slot order: the always-on-top pass reorders
     // layers, and order is precisely what this oracle exists to check.
     const l = this.compositeOrder()
@@ -749,8 +756,9 @@ export class AdsScheduler {
       .join(",");
     digestFrameNo++;
     digestSink(
-      `F ${digestFrameNo} raft=${st?.raft ?? 0} night=${st?.night ? 1 : 0} ` +
-        `zones=${zones} L=[${l}] hol=${hol}`,
+      `F ${digestFrameNo} isl=${st?.xPos ?? 0},${st?.yPos ?? 0} tide=${tide} ` +
+        `raft=${st?.raft ?? 0} night=${st?.night ? 1 : 0} clouds=${clouds} zones=${zones} ` +
+        `L=[${l}] hol=${hol}`,
     );
   }
 

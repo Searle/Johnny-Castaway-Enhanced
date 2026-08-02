@@ -9,9 +9,11 @@ import type { Layer, Renderer } from "../render/renderer";
 export let traceSink: ((line: string) => void) | null = null;
 export function setTraceSink(fn: ((line: string) => void) | null): void {
   traceSink = fn;
-  // Reset both deterministic streams to their seeds when (dis)arming trace.
+  // Reset all three deterministic streams to their seeds when (dis)arming
+  // trace, mirroring the Go engine's traceResetForScene.
   rngAds = 0x1234abcd;
   rngTimer = 0x9e3779b9;
+  rngIsland = 0x85ebca6b;
 }
 function trace(line: string): void {
   if (traceSink) traceSink(line);
@@ -32,6 +34,13 @@ export function setSoundSink(s: { play(id: number): void } | null): void {
 // only while the trace sink is set; normal playback uses Math.random.
 let rngAds = 0x1234abcd;
 let rngTimer = 0x9e3779b9;
+// Third stream: the island's procedural state (backdrop, tide, VARPOS position,
+// cloud count/type/speed/position), mirroring the Go engine's traceRngIsland.
+// Isolated for the same reason as the other two — island draws must not be able
+// to shift the ADS pick. Before this existed the island read the unseeded rand
+// on BOTH sides, which made the Go engine nondeterministic against itself and
+// left the frame digest unable to report any island state at all.
+let rngIsland = 0x85ebca6b;
 function mulberry32(state: number, n: number): [number, number] {
   state = (state + 0x6d2b79f5) >>> 0;
   let z = state;
@@ -53,6 +62,16 @@ export function randTimer(n: number): number {
   if (!traceSink) return Math.floor(Math.random() * n);
   const [s, v] = mulberry32(rngTimer, n);
   rngTimer = s;
+  return v;
+}
+// randIsland: deterministic under trace/digest, else Math.random — so real
+// playback keeps its run-to-run variety and only the oracles get determinism.
+// Matches the Go engine's islandRand.
+export function randIsland(n: number): number {
+  if (n <= 0) return 0;
+  if (!traceSink) return Math.floor(Math.random() * n);
+  const [s, v] = mulberry32(rngIsland, n);
+  rngIsland = s;
   return v;
 }
 

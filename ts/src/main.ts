@@ -485,27 +485,32 @@ function dayOfYearNow(): number {
 // the ADS viewer, not story mode, so the island state it reports is derived the
 // same way there.
 //
-// Only `raft` is computed. The other printed fields are zero on that path by
-// construction, verified rather than assumed:
-//   - night / holiday: storyCalculateIslandFromDateAndTime is called ONLY from
-//     storyPlay (story.go:152), never from setupSceneForTrace, so islandState
-//     keeps the zeros adsInit left. Confirmed on every sampled scene.
-//   - position, tide, clouds, backdrop: dropped from the format entirely
-//     because they come from the UNSEEDED global rand — see trace.go's note.
+// It runs the REAL storyCalculateIslandFromScene rather than a reimplementation,
+// so the island RNG stream is consumed in exactly the same order and count as
+// the Go engine's — which is the whole reason those fields can be compared at
+// all. A hand-rolled copy would drift the moment either branch changed.
+//
+// night / holiday stay zero: storyCalculateIslandFromDateAndTime is called ONLY
+// from storyPlay (story.go:152), never from setupSceneForTrace, so islandState
+// keeps the zeros adsInit left. Verified across every sampled scene.
 function digestIslandForScene(adsName: string, tag: number): DigestIslandState {
   const name = adsName.toUpperCase();
   const scene = STORY_SCENES.find((s) => s.adsName.toUpperCase() === name && s.adsTag === tag);
-  const st: DigestIslandState = { raft: 0, night: false, holiday: 0 };
-  if (!scene) return st;
-  // storyCalculateIslandFromScene's raft ladder, over setupSceneForTrace's day:
-  // a dated scene pins storyCurrentDay, otherwise it is activeConfig.CurrentDay
-  // (1 for the freshly-built binary the oracle harness runs).
-  const day = scene.dayNo !== 0 ? scene.dayNo : 1;
-  if (scene.flags & SceneFlag.NORAFT) st.raft = 0;
-  else if (day <= 2) st.raft = 1;
-  else if (day <= 5) st.raft = day - 1;
-  else st.raft = 5;
-  return st;
+  if (!scene) return { raft: 0, night: false, holiday: 0, lowTide: false, xPos: 0, yPos: 0 };
+  // setupSceneForTrace: a dated scene pins storyCurrentDay, otherwise it is
+  // activeConfig.CurrentDay (1 for the freshly-built binary the harness runs).
+  const driver = new Story({ now: () => new Date(), loadProgress: () => null });
+  driver.currentDay = scene.dayNo !== 0 ? scene.dayNo : 1;
+  driver.calculateIslandFromScene(scene);
+  const st = driver.island;
+  return {
+    raft: st.raft,
+    night: false,
+    holiday: 0,
+    lowTide: st.lowTide,
+    xPos: st.xPos,
+    yPos: st.yPos,
+  };
 }
 
 // ---- dropdown population ----

@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"math/rand"
 	"os"
 	"strings"
 
@@ -78,6 +79,7 @@ func traceClose() {
 func traceResetForScene() {
 	traceRngAds = 0x1234abcd
 	traceRngTimer = 0x9e3779b9
+	traceRngIsland = 0x85ebca6b
 	traceFrameNo = 0
 	traceCurTag = 0
 	traceReachedBudget = false
@@ -88,14 +90,27 @@ func traceResetForScene() {
 // so a run is reproducible and the TS port (identical mulberry32 PRNG, same
 // seeds) makes the same choices — the traces diff end-to-end.
 //
-// TWO INDEPENDENT STREAMS: ADS scene selection (traceRngAds) and TTM TIMER
-// (traceRngTimer). Concurrent scenes consume TIMER randoms in amounts that
-// depend on exact frame interleaving; a single shared stream let that shift the
-// ADS pick and select a different scene. Separate streams keep the ADS picks
-// deterministic regardless of how many TIMER randoms the frames drew.
+// THREE INDEPENDENT STREAMS, each isolated for the same reason: a stream that
+// shares state with another lets one subsystem's draw count shift the other's
+// choices.
+//
+//   - traceRngAds    ADS scene selection.
+//   - traceRngTimer  TTM TIMER opcode. Concurrent scenes consume TIMER randoms
+//     in amounts that depend on exact frame interleaving; sharing one stream let
+//     that shift the ADS pick and select a different scene.
+//   - traceRngIsland The island's procedural state: backdrop choice, tide,
+//     VARPOS position, and cloud count/type/speed/position.
+//
+// The island stream was added last, and its absence was a real hole in the
+// instrument rather than a property of the two engines: reading the UNSEEDED
+// global rand made the Go engine nondeterministic AGAINST ITSELF. Measured over
+// ten identical `STAND 2` runs — 4 tide=hi / 6 tide=lo, cloud counts 4/1/2,
+// backdrop OCEAN02/OCEAN01 — which forced those fields out of the frame digest
+// and left it blind to that whole class of state. Seeded, they are comparable.
 var (
-	traceRngAds   uint32 = 0x1234abcd // ADS RANDOM-block picks
-	traceRngTimer uint32 = 0x9e3779b9 // TTM TIMER opcode
+	traceRngAds    uint32 = 0x1234abcd // ADS RANDOM-block picks
+	traceRngTimer  uint32 = 0x9e3779b9 // TTM TIMER opcode
+	traceRngIsland uint32 = 0x85ebca6b // island: backdrop, tide, varpos, clouds
 )
 
 func mulberry32(state *uint32, n int) int {
@@ -113,6 +128,19 @@ func mulberry32(state *uint32, n int) int {
 // traceRandAds / traceRandTimer draw from their respective streams.
 func traceRandAds(n int) int   { return mulberry32(&traceRngAds, n) }
 func traceRandTimer(n int) int { return mulberry32(&traceRngTimer, n) }
+
+// islandRand is the island's draw. Outside trace/digest mode it falls through
+// to the normal global rand, so real playback keeps its run-to-run variety —
+// only the oracles get determinism.
+func islandRand(n int) int {
+	if !traceEnabled {
+		if n <= 0 {
+			return 0
+		}
+		return rand.Int() % n
+	}
+	return mulberry32(&traceRngIsland, n)
+}
 
 // schedLog: temporary scheduler-decision log for the oracle diff. Goes to
 // stderr (stdout carries the -traceserver protocol) and only when JC_SCHED_LOG
@@ -272,35 +300,36 @@ func traceDumpCel(slot *TTtmSlot, spriteNo, imageNo uint16) {
 //
 // Format (stable field order, no floats):
 //
-//	F <n> raft=<0-5> night=<0|1> zones=<0|1> L=[<slot>:<tag>,...] hol=<0|1>
+//	F <n> isl=<x>,<y> tide=<hi|lo> raft=<0-5> night=<0|1> clouds=<n> zones=<0|1> L=[<slot>:<tag>,...] hol=<0-4>
 //
-// FIELDS DELIBERATELY DROPPED, because they are NONDETERMINISTIC on the Go side
-// alone and have nothing to do with compositing (measured: three identical
-// `STAND 2` runs gave clouds=4/1/2 and bg=OCEAN02/OCEAN01/OCEAN01):
+// Every field here is DETERMINISTIC. The island's procedural state (backdrop,
+// tide, VARPOS position, cloud count) originally read from the UNSEEDED global
+// rand, which made the Go engine disagree with ITSELF run to run — measured
+// over ten identical `STAND 2` runs: 4 tide=hi / 6 tide=lo, cloud counts 4/1/2,
+// backdrop OCEAN02/OCEAN01. Those fields were dropped for a while as a result,
+// which quietly left the oracle blind to all of it. The real fix was a seeded
+// island stream (traceRngIsland, reset per scene by traceResetForScene), not a
+// smaller format.
 //
-//   - EVERYTHING about the clouds, count and running-flag alike: islandInit
-//     picks `rand.Int() % 6` clouds from the UNSEEDED global rand, and
-//     islandAnimateClouds sets isRunning = 0 when that count is 0, so even the
-//     boolean inherits the randomness (caught as a clouds=1/clouds=0 flip on
-//     one line in 3 of 12 runs — see the note on sampling below).
-//   - the backdrop NAME: islandInit picks the ocean screen the same way.
-//   - the island x/y: VARPOS scenes randomize those the same way (already
-//     zeroed here and in traceShots for the same reason).
-//   - the TIDE: storyCalculateIslandFromScene sets it from `rand.Int() % 2` on
-//     a LOWTIDE_OK scene. Measured over 10 identical `STAND 2` runs: 4 hi, 6 lo.
-//     (Four consecutive runs agreed first, which is exactly how a flaky field
-//     talks its way into an oracle — sample it properly before trusting it.)
+// The BACKDROP NAME is deliberately absent, and for a different reason than the
+// rand fields above — it is deterministic on both sides now, but it measures
+// "who last called LOAD_SCREEN", which the two architectures answer differently
+// by design. In the engine the ISLAND installs the backdrop (island.go:45/48
+// grLoadScreen of NIGHT/OCEAN0n) and a scene's own LOAD_SCREEN of ISLETEMP.SCR
+// is the island's own screen; the port keeps a baked ISLETEMP and suppresses
+// the scene's load via TtmThread.keepBackground. Both are correct; comparing
+// the name would encode a false equivalence. Everything the backdrop CHOICE
+// depends on (night, tide, position) is reported directly instead.
 //
-// What survives is what the oracle is FOR: whether the cloud/holiday threads are
-// RUNNING (a slot-membership fact, not a random count), whether saved zones
-// exist, and above all L=[...] — which layers composite, in what order. Keeping
-// a nondeterministic field would mean either a flaky oracle or a weakened
-// comparison, and the plan is explicit that the layer list is the payload.
+// `L=[...]` is still the load-bearing payload: which thread layers composite,
+// in what order. Order and membership are what catch z-order, layer-lifetime
+// and reap-timing bugs, and all of it is read straight off grUpdateDisplay's
+// arguments, so nothing has to be drawn to produce it.
 //
-// Deliberately NO per-layer sprite count: no such counter exists on either side,
-// so it would have to be invented twice with identical semantics (when to reset,
-// whether CLEAR_SCREEN zeroes it, whether an off-screen blit counts) — a new
-// source of divergence unrelated to the bugs this exists to catch. The
+// Deliberately NO per-layer sprite count: no such counter exists on either
+// side, so it would have to be invented twice with identical semantics (when to
+// reset, whether CLEAR_SCREEN zeroes it, whether an off-screen blit counts) — a
+// new source of divergence unrelated to the bugs this exists to catch. The
 // draw-call oracle already proves sprite-level equality. Keep this about
 // STRUCTURE.
 var (
@@ -323,13 +352,21 @@ func emitDigest(
 	ttmHolidayThread *TTtmThread,
 	ttmCloudsThread *TTtmThread,
 ) {
+	tide := "hi"
+	if islandState.lowTide != 0 {
+		tide = "lo"
+	}
+	clouds := 0
+	if ttmCloudsThread != nil && ttmCloudsThread.isRunning != 0 {
+		clouds = int(islandState.clouds.numClouds)
+	}
 	zones := 0
 	if grSavedZonesLayer != nil {
 		zones = 1
 	}
 	hol := 0
 	if ttmHolidayThread != nil && ttmHolidayThread.isRunning != 0 {
-		hol = 1
+		hol = islandState.holiday
 	}
 
 	// The layer list IS the payload: membership and order are what catch
@@ -344,7 +381,8 @@ func emitDigest(
 
 	digestFrameNo++
 	fmt.Fprintf(digestOut,
-		"F %d raft=%d night=%d zones=%d L=[%s] hol=%d\n",
-		digestFrameNo, islandState.raft, islandState.night,
-		zones, strings.Join(l, ","), hol)
+		"F %d isl=%d,%d tide=%s raft=%d night=%d clouds=%d zones=%d L=[%s] hol=%d\n",
+		digestFrameNo, islandState.xPos, islandState.yPos, tide,
+		islandState.raft, islandState.night, clouds, zones,
+		strings.Join(l, ","), hol)
 }

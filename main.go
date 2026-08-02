@@ -842,11 +842,10 @@ func setupSceneForTrace(adsName string, tagNo int) string {
 				// are drawn WHERE RELATIVE TO EACH OTHER, not about a random
 				// island placement neither side is testing. The draw-call trace
 				// is unaffected: it logs the raw, pre-offset coordinates.
-				// Same for the frame digest: it reports islandState.xPos, and a
-				// VARPOS scene would otherwise report a different random value
-				// every run, making the oracle nondeterministic on a field that
-				// has nothing to do with compositing.
-				if traceShots || digestEnabled {
+				// NOT for the frame digest: islandState.xPos is deterministic
+				// there now (seeded island stream), so the digest compares the
+				// real VARPOS placement rather than a zeroed stand-in.
+				if traceShots {
 					ttmDx = 0
 					ttmDy = 0
 					islandState.xPos = 0

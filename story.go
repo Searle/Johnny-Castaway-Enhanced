@@ -79,7 +79,7 @@ func storyCalculateIslandFromDateAndTime() {
 
 func storyCalculateIslandFromScene(scene *TStoryScene) {
 	// Low tide ?
-	if (scene.flags&LOWTIDE_OK == LOWTIDE_OK) && (rand.Int()%2 != 0) {
+	if (scene.flags&LOWTIDE_OK == LOWTIDE_OK) && (islandRand(2) != 0) {
 		islandState.lowTide = 1
 	} else {
 		islandState.lowTide = 0
@@ -87,15 +87,15 @@ func storyCalculateIslandFromScene(scene *TStoryScene) {
 
 	// Randomize the position of the island
 	if scene.flags&VARPOS_OK == VARPOS_OK {
-		if rand.Int()%2 != 0 {
-			islandState.xPos = -222 + (rand.Int() % 109)
-			islandState.yPos = -44 + (rand.Int() % 128)
-		} else if rand.Int()%2 != 0 {
-			islandState.xPos = -114 + (rand.Int() % 134)
-			islandState.yPos = -14 + (rand.Int() % 99)
+		if islandRand(2) != 0 {
+			islandState.xPos = -222 + islandRand(109)
+			islandState.yPos = -44 + islandRand(128)
+		} else if islandRand(2) != 0 {
+			islandState.xPos = -114 + islandRand(134)
+			islandState.yPos = -14 + islandRand(99)
 		} else {
-			islandState.xPos = -114 + (rand.Int() % 119)
-			islandState.yPos = -73 + (rand.Int() % 60)
+			islandState.xPos = -114 + islandRand(119)
+			islandState.yPos = -73 + islandRand(60)
 		}
 	} else {
 		if scene.flags&LEFT_ISLAND == LEFT_ISLAND {

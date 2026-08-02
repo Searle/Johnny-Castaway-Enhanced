@@ -8,14 +8,19 @@ caught none of the compositor bugs that humans found by watching the screen.
 
 This diffs one line per DISPLAYED COMPOSITE from each engine:
 
-    F <n> raft=<0-5> night=<0|1> zones=<0|1> L=[<slot>:<tag>,...] hol=<0|1>
+    F <n> isl=<x>,<y> tide=<hi|lo> raft=<0-5> night=<0|1> clouds=<n> zones=<0|1> L=[<slot>:<tag>,...] hol=<0-4>
 
 `L=[...]` is the payload: WHICH thread layers composite, in WHAT ORDER, and —
 via the line's position in the sequence — WHEN. That is exactly the blind spot:
-z-order, layer lifetime and presentation timing. Fields derived from the
-UNSEEDED global rand (tide, cloud count, island position, backdrop name) are
-deliberately absent; see the format note in trace.go for the measurements that
-got them removed.
+z-order, layer lifetime and presentation timing.
+
+Every field is deterministic: the island's procedural state (tide, position,
+clouds) runs on a THIRD seeded RNG stream (traceRngIsland / randIsland),
+isolated from the ADS and TIMER streams and re-seeded per scene. Before that
+existed it read the unseeded global rand and the GO ENGINE DISAGREED WITH
+ITSELF run to run. The backdrop NAME is still excluded, but for an unrelated
+reason — it measures "who last called LOAD_SCREEN", which the two architectures
+answer differently by design. See the format note in trace.go.
 
 It is a TEXT oracle emitted from the arguments already at hand, so it skips
 compositing entirely and runs at draw-call-sweep speed (measured: 27s for all
@@ -33,8 +38,10 @@ Canary 1 slips through by construction: `L=[...]` lists SCENE THREADS, and the
 clouds are a fixed compositor slot that never appears in it. Three
 baseline-passing scenes stayed green with the clouds deliberately blitted above
 every scene layer. The plan's claim that the digest makes the Step 1 compositor
-work verifiable is therefore WRONG, and no amount of tuning here fixes it — the
-cloud fields had to be dropped from the format anyway for being nondeterministic.
+work verifiable is therefore WRONG, and seeding the island RNG did not change it:
+`clouds=<n>` reports how many clouds EXIST, never which SLOT they composite in.
+Nothing in a per-composite text line can express z-order between a fixed slot
+and the scene array.
 
 Slot ORDER is covered by cloudorder.py instead, which reads the slots directly
 and asks who wins where a cloud and a scene overlap. Run BOTH; neither is a

@@ -13,6 +13,7 @@
 // These assets are loaded by engine code, not by any TTM's LOAD_IMAGE, so the
 // extractor pulls them separately into _ISLAND/ (see tools/tsextract).
 
+import { randIsland, traceSink } from "../ttm/interpreter";
 import type { LoadedSheet } from "../manifest";
 import type { Layer } from "../render/renderer";
 import { Holiday, type IslandState } from "./story";
@@ -67,7 +68,13 @@ export class Island {
     private rnd: () => number,
   ) {}
 
+  // Island draws go through the seeded ISLAND stream (randIsland) under
+  // trace/digest, so the oracle can compare backdrop, tide, VARPOS position and
+  // cloud state against the Go engine's islandRand. Outside trace mode
+  // randIsland falls back to Math.random, and the injected `rnd` still governs
+  // unit tests that construct an Island directly.
   private randInt(n: number): number {
+    if (traceSink) return randIsland(n);
     return Math.floor(this.rnd() * n);
   }
 

@@ -16,6 +16,7 @@
 // (island.go) and therefore real VARPOS positioning, the intro, and fades.
 
 import { STORY_SCENES, SceneFlag as F, type StoryScene } from "./data";
+import { randIsland, traceSink } from "../ttm/interpreter";
 
 export interface IslandState {
   night: boolean;
@@ -85,6 +86,14 @@ export class Story {
     return Math.floor(this.rnd() * n);
   }
 
+  // islandRandInt draws from the seeded ISLAND stream under trace/digest (the
+  // Go engine's islandRand), keeping island state comparable without letting it
+  // shift scene selection, which keeps using `rnd` above.
+  private islandRandInt(n: number): number {
+    if (traceSink) return randIsland(n);
+    return Math.floor(this.rnd() * n);
+  }
+
   // storyUpdateCurrentDay: advance the arc if the calendar date changed since
   // the last run, wrapping back to day 1 past the end.
   updateCurrentDay(): void {
@@ -141,20 +150,26 @@ export class Story {
   // FINAL scene's flags. Note this runs against the FINAL scene, so the whole
   // episode shares one tide/position/raft configuration.
   calculateIslandFromScene(scene: StoryScene): void {
-    this.island.lowTide = (scene.flags & F.LOWTIDE_OK) !== 0 && this.randInt(2) !== 0;
+    // These are ISLAND state, so they draw from the island stream (islandRand
+    // in the Go engine), not the scene-selection stream. Note Go's `&&`
+    // short-circuits: with no LOWTIDE_OK flag there is NO draw at all, and the
+    // port must match that or the stream desyncs from this point on.
+    this.island.lowTide = (scene.flags & F.LOWTIDE_OK) !== 0 && this.islandRandInt(2) !== 0;
 
     if (scene.flags & F.VARPOS_OK) {
       // Three overlapping placement boxes, chosen by successive coin flips —
-      // reproduced exactly (including the nested bias) from story.go.
-      if (this.randInt(2) !== 0) {
-        this.island.xPos = -222 + this.randInt(109);
-        this.island.yPos = -44 + this.randInt(128);
-      } else if (this.randInt(2) !== 0) {
-        this.island.xPos = -114 + this.randInt(134);
-        this.island.yPos = -14 + this.randInt(99);
+      // reproduced exactly (including the nested bias) from story.go. The draw
+      // COUNT varies with the branch taken (1-3 flips plus 2 range draws), so
+      // both engines must take the same branch to stay in step.
+      if (this.islandRandInt(2) !== 0) {
+        this.island.xPos = -222 + this.islandRandInt(109);
+        this.island.yPos = -44 + this.islandRandInt(128);
+      } else if (this.islandRandInt(2) !== 0) {
+        this.island.xPos = -114 + this.islandRandInt(134);
+        this.island.yPos = -14 + this.islandRandInt(99);
       } else {
-        this.island.xPos = -114 + this.randInt(119);
-        this.island.yPos = -73 + this.randInt(60);
+        this.island.xPos = -114 + this.islandRandInt(119);
+        this.island.yPos = -73 + this.islandRandInt(60);
       }
     } else if (scene.flags & F.LEFT_ISLAND) {
       this.island.xPos = -272;

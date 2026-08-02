@@ -74,15 +74,41 @@ Two traps that cost real time here, both specific to this setup:
   synchronously (`renderer.present()`) and snapshot, rather than sampling
   whatever the loop last painted.
 
-## Determinism: what the digest oracle may not report
+## Determinism: three seeded RNG streams
 
-Several engine fields come from the **unseeded** global `rand` and differ
-run-to-run on the Go side alone. Measured, not assumed: 10 identical `STAND 2`
-runs gave 4 `tide=hi` / 6 `tide=lo`; cloud count varied 4/1/2; the backdrop
-varied `OCEAN02`/`OCEAN01`. Four consecutive runs agreed before the flake
-appeared — sample properly before trusting a field.
+Every field the digest reports is deterministic, because the oracles run on
+**three independent seeded streams**, re-seeded per scene:
 
-So the digest format deliberately excludes tide, cloud count/running, island
-x/y, and the backdrop name. `L=[...]` (which layers, in what order) plus the
-composite count is the load-bearing payload. Prefer dropping a flaky field over
-weakening the comparison.
+| stream | Go | TS | covers |
+|---|---|---|---|
+| ADS | `traceRngAds` | `randAds` | scene selection (RANDOM blocks) |
+| TIMER | `traceRngTimer` | `randTimer` | the TTM `TIMER` opcode |
+| island | `traceRngIsland` / `islandRand` | `randIsland` | backdrop, tide, VARPOS position, clouds |
+
+They are **isolated on purpose**: a shared stream lets one subsystem's draw
+count shift another's choices. That was learned the hard way for ADS/TIMER, and
+the island stream was added for the same reason.
+
+Before the island stream existed, that code read the unseeded global `rand`,
+which made **the Go engine nondeterministic against itself** — 10 identical
+`STAND 2` runs gave 4 `tide=hi` / 6 `tide=lo`, cloud counts 4/1/2, backdrop
+`OCEAN02`/`OCEAN01`. The first *four* runs agreed before the flake appeared, so
+sample properly (15-20 runs) before trusting a field. The right fix was seeding
+the stream, not shrinking the format.
+
+Two constraints when touching island RNG:
+
+- **Draw count and order must match on both sides.** Go's `&&` short-circuits,
+  so a scene without `LOWTIDE_OK` performs *no* tide draw; the VARPOS block does
+  1-3 coin flips plus 2 range draws depending on the branch. `__digest` runs the
+  REAL `Story.calculateIslandFromScene` rather than a reimplementation for
+  exactly this reason.
+- **Outside trace mode both engines fall back to the normal random**, so real
+  playback keeps its variety. Only the oracles are deterministic.
+
+**The backdrop NAME is deliberately not reported**, for a different reason: it
+measures "who last called `LOAD_SCREEN`", which the two architectures answer
+differently by design (the engine's island installs `OCEAN0n`/`NIGHT`; the port
+keeps a baked `ISLETEMP` and suppresses the scene's load via `keepBackground`).
+Comparing it would encode a false equivalence. Everything the choice depends on
+— night, tide, position — is reported directly instead.
