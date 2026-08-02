@@ -34,6 +34,10 @@ Step 2 lists four deliberate bugs the digest must catch. Measured results:
   4. an extra present on a no-draw iteration               CAUGHT (93->128)
   1. clouds composited in the wrong slot                   *** NOT CAUGHT ***
 
+A fifth, added once the format reported true composite order: disabling the
+port's always-on-top pass is CAUGHT (WALKSTUF:1 goes red as a NEW REGRESSION),
+so L=[...] does verify scene-layer z-order — just not the fixed slots.
+
 Canary 1 slips through by construction: `L=[...]` lists SCENE THREADS, and the
 clouds are a fixed compositor slot that never appears in it. Three
 baseline-passing scenes stayed green with the clouds deliberately blitted above
@@ -55,34 +59,25 @@ import json, os, sys, subprocess, difflib
 import functools
 print = functools.partial(print, flush=True)  # observable in background runs
 
-# Scenes that still diverge. WALKSTUF:1 is the only one left.
+# Scenes known to diverge. EMPTY — the digest is at 66/66.
 #
-# The other 18 (MARY:5, MISCGAG:1/2 and every STAND) were TWO bugs, both fixed:
+# It took three fixes and one oracle correction to get here:
+#   1. scheduler.ts — restart() (adsPlay re-entry) was re-initialising the
+#      island metronomes, which adsInitIsland only does once per scene. Re-arming
+#      bg mid-scene changed `mini` and so the composite count.
+#   2. main.ts — the saved-zones slot survived a window.__load switch; saved
+#      zones are per-scene (islandInit's grLoadScreen releases them).
+#   3. main.ts — two blank composites at the walk->scene handover: layers were
+#      wiped before the async ADS load, and present() ran before the first draw.
+#   4. trace.go — THE ORACLE ITSELF was wrong for WALKSTUF:1. emitDigest
+#      reported raw fixed-array order while grUpdateDisplay makes two passes
+#      when an always-on-top thread is present (non-on-top, then on-top). The
+#      port was right and the oracle was measuring something the compositor does
+#      not do. Distrust a good score; distrust a bad one for the same reason.
 #
-# 1. scheduler.ts — restart(), which is adsPlay re-entry for a script that ran
-#    dry, was re-initialising the island metronomes. adsInitIsland runs ONCE per
-#    scene, BEFORE the engine's `for !traceReachedBudget { adsPlay(...) }` loop,
-#    so re-arming bg mid-scene put it half a period out of step, changed `mini`,
-#    and therefore changed the composite count for the rest of the run.
-#    Localised by logging the re-arm DECISION on both sides: identical for 69
-#    events, then engine bg=5 vs port bg=8.
-#
-# 2. main.ts — the saved-zones slot survived a window.__load scene switch. Saved
-#    zones are per-scene: within one only LOAD_SCREEN / RESTORE_ZONE release
-#    them, but a NEW scene starts with none (islandInit's grLoadScreen calls
-#    grReleaseSavedLayer, and -traceserver reaches every scene through it). This
-#    one only showed up in the WARM sweep, and only as `zones=1` vs `zones=0` on
-#    line 1 — the schedlogs were byte-identical, 889 = 889 lines, so it was never
-#    scheduler state and a state fingerprint could not see it. Found by diffing a
-#    warm against a cold run of the same scene, which is the "diff DECISION
-#    SEQUENCES" technique from INSIGHTS.md applied to the digest itself.
-#
-# The warm and cold sweeps now agree, so INSIGHTS.md's "__load must stay
-# equivalent to a cold reload" invariant holds again. Never grow this list to
-# make a run green.
-KNOWN_FAILING = {
-    ("WALKSTUF", 1),
-}
+# Never grow this list to make a run green — fix the port, or fix the oracle if
+# the oracle is what is wrong.
+KNOWN_FAILING: set[tuple[str, int]] = set()
 
 HERE = os.path.dirname(__file__)
 TS = os.path.abspath(os.path.join(HERE, "..", ".."))

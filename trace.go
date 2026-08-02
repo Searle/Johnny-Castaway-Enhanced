@@ -370,13 +370,43 @@ func emitDigest(
 	}
 
 	// The layer list IS the payload: membership and order are what catch
-	// z-order, layer-lifetime and reap-timing bugs. Emitted in composite order,
-	// i.e. the same fixed-array order grUpdateDisplay blits.
-	var l []string
+	// z-order, layer-lifetime and reap-timing bugs. It must therefore report the
+	// order grUpdateDisplay ACTUALLY blits, which is not always fixed-array
+	// order: when an always-on-top thread is present it makes two passes,
+	// non-on-top first and on-top second (graphics.go, `if onTopIdx >= 0`).
+	//
+	// Reporting plain array order here was an ORACLE bug that made WALKSTUF:1
+	// the last "failing" scene: the Go side said [1:1,1:2,1:4] while the port
+	// said [1:4,1:1,1:2], and the PORT was right — 1:1 and 1:2 are on-top, so
+	// they belong last. The oracle was measuring something the compositor does
+	// not do.
+	//
+	// The johnnyIdx pass below it in grUpdateDisplay is deliberately NOT
+	// mirrored: the port does not implement that exception yet (see the note on
+	// ALWAYS_ON_TOP in scheduler.ts), so reporting it would flag a divergence
+	// the digest cannot act on. It stays a known gap rather than a false green.
+	onTopPresent := false
 	for i := 0; i < MaxTTMThreads; i++ {
-		if ttmThreads[i].isRunning != 0 {
+		if ttmThreads[i].isRunning != 0 && isAlwaysOnTopThread(ttmThreads[i].sceneSlot, ttmThreads[i].sceneTag) {
+			onTopPresent = true
+			break
+		}
+	}
+	var l []string
+	appendPass := func(wantOnTop bool) {
+		for i := 0; i < MaxTTMThreads; i++ {
+			if ttmThreads[i].isRunning == 0 {
+				continue
+			}
+			if onTopPresent && isAlwaysOnTopThread(ttmThreads[i].sceneSlot, ttmThreads[i].sceneTag) != wantOnTop {
+				continue
+			}
 			l = append(l, fmt.Sprintf("%d:%d", ttmThreads[i].sceneSlot, ttmThreads[i].sceneRootTag))
 		}
+	}
+	appendPass(false)
+	if onTopPresent {
+		appendPass(true)
 	}
 
 	digestFrameNo++

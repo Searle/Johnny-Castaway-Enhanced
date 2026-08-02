@@ -184,7 +184,7 @@ newest and then demands an uncached browser build, and the sweep dies at launch.
 | Check | Command (from `ts/`) | Status | Runtime |
 |---|---|---|---|
 | Draw calls | `uv run --with playwright==1.61.0 python tools/oracle-diff/sweep.py 150` | **66/66** | ~31s |
-| Frame digest | `uv run --with playwright==1.61.0 python tools/oracle-diff/digest.py 60` | **47/66** | ~27s |
+| Frame digest | `uv run --with playwright==1.61.0 python tools/oracle-diff/digest.py 60` | **66/66** | ~27s |
 | Pixels | `uv run --with playwright==1.61.0 --with pillow --with numpy python tools/oracle-diff/pixels.py 60` | spot-check only, NOT a gate | ~6m |
 | Walk animation | `npm run walk-check` | **1792/1792** | ~10s |
 | Story logic | `npm run story-check` | pass | ~2s |
@@ -422,17 +422,30 @@ false equivalence. Everything the choice DEPENDS on — night, tide, position �
 reported directly instead. Verified: with `bg` normalised away, MARY:1 was
 byte-identical 69/69 lines before the field was removed.
 
-**19 of 66 fail, and it is ONE bug.** 14 are STAND; most differ by ±1..7
-composites. Root-caused via `JC_SCHED_LOG` (the decision-sequence diff, as
-always): with identical thread state `{1=1:35 r1 t6 d10 st0}`, the engine picks
-`mini` 1 then 5, the port picks 4 then 2. Both reach `t0` in two steps, so the
-DRAW CALLS are identical — which is exactly why the draw-call sweep reads 66/66
-on these same scenes — but each `mini` is one loop iteration and therefore one
-composite, so the port shows a different number of them. The port's background/
-clouds metronomes drift out of phase with the engine's; `islandAnimateClouds`
-stopping the cloud thread (`numClouds == 0`) removes it from the engine's `mini`
-while the port keeps ticking a phantom metronome. **Deferred to Step 3**, which
-rewrites the loop that owns this.
+**66/66.** Getting there took three port fixes and one ORACLE fix, and the last
+one is the cautionary tale:
+
+1. `restart()` (adsPlay re-entry for a script that ran dry) was re-initialising
+   the island metronomes. `adsInitIsland` runs once per SCENE, before the
+   engine's `for !traceReachedBudget { adsPlay(...) }` loop, so re-arming bg
+   mid-scene put it half a period out of step, changed `mini`, and therefore
+   changed the composite count for the rest of the run. Found by logging the
+   re-arm DECISION on both sides — identical for 69 events, then engine bg=5 vs
+   port bg=8.
+2. The saved-zones slot survived a `window.__load` switch. Saved zones are
+   PER-SCENE (islandInit's `grLoadScreen` releases them); Step 1 correctly
+   stopped `resetLayers()` clearing the fixed slots, and this one then needed an
+   explicit per-scene release it never got.
+3. Two blank composites at the walk->scene handover: `playScene` wiped the
+   layers BEFORE awaiting the ADS load, and called `present()` before the first
+   draw. The engine has neither gap.
+4. **The ORACLE was wrong for the last scene.** `emitDigest` reported raw
+   fixed-array order, while `grUpdateDisplay` makes TWO passes when an
+   always-on-top thread is present (non-on-top, then on-top). Go said
+   `[1:1,1:2,1:4]`, the port said `[1:4,1:1,1:2]`, and **the port was right** —
+   the oracle was measuring something the compositor does not do. Rule 1 cuts
+   both ways: distrust a bad score too, and check the instrument before
+   "fixing" the code.
 
 **Canary-tested, and it FAILED one of the four.** RESTRUCTURE-PLAN Step 2 lists
 four deliberate bugs the digest must catch:
