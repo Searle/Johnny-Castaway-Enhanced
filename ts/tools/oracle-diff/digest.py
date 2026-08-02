@@ -70,12 +70,18 @@ print = functools.partial(print, flush=True)  # observable in background runs
 #
 # KNOWN HARNESS ISSUE — run with COLD_RELOAD=1 for a true reading. Those 18 pass
 # on a cold reload and still fail in the normal in-page sweep, so state leaks
-# across window.__load in a way it did not before. Neither side leaks in
-# isolation (STAND:2 gives 270 composites alone, and 270 after another scene on
-# the persistent Go server; the port's first-scene and post-__load schedlogs are
-# byte-identical), and the first 30 swept scenes pass, so it is cumulative and
-# not yet located. INSIGHTS.md's "__load must stay equivalent to a cold reload"
-# invariant is the thing to re-establish.
+# across window.__load, breaking INSIGHTS.md's "__load must stay equivalent to a
+# cold reload" invariant.
+#
+# ONE leak has been found and fixed (stale traceFrameNo/traceReachedBudget: see
+# stopPlayback in main.ts) using tools/oracle-diff/leakcheck.py, which
+# fingerprints every carry-over candidate at scene start and diffs a warm sweep
+# against a cold one. Warm and cold fingerprints now match over 20 scenes, yet
+# the warm sweep still fails — so at least one more leak lives in state that
+# probe does not yet cover. Widen FINGERPRINT and run it again; the most likely
+# remaining candidate is the shared `manifest` handed out by loadAnimation's
+# cache (LoadedSheet itself is immutable — name + frames — so the sheets are
+# not the suspect).
 #
 # Never grow this list to make a run green.
 KNOWN_FAILING = {

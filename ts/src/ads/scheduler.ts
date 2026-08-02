@@ -173,6 +173,13 @@ export class AdsScheduler {
     this.islandThreadsRunning = opts.island ?? true;
   }
 
+  // The island metronomes, for tools/oracle-diff/leakcheck.py. They are the
+  // state that most recently leaked across a scene switch, and they are not
+  // otherwise observable from outside.
+  __metronome(): string {
+    return `bg=${this.bgTimer}/${this.bgDelay} cl=${this.cloudsTimer}/${this.cloudsDelay} isl=${this.islandThreadsRunning ? 1 : 0}`;
+  }
+
   // live returns the running scenes in slot order (skipping free slots).
   private live(): SceneThread[] {
     return this.threads.filter((s): s is SceneThread => s !== null);

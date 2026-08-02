@@ -75,6 +75,13 @@ export function randIsland(n: number): number {
   return v;
 }
 
+// The three stream states, for tools/oracle-diff/leakcheck.py. Seeds are reset
+// by setTraceSink, so a value here that differs between a warm __load and a
+// cold reload means the reset did not happen where it should have.
+export function rngSeeds(): { ads: number; timer: number; island: number } {
+  return { ads: rngAds, timer: rngTimer, island: rngIsland };
+}
+
 // A parsed tag: a jump target the GOTO_TAG / PURGE opcodes reference.
 interface Tag {
   id: number;

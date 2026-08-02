@@ -1,6 +1,6 @@
 import { loadIndex, loadAnimation, type AnimIndex, type IndexEntry, type AdsIndexEntry } from "./manifest";
 import { Canvas2DRenderer } from "./render/canvas2d";
-import { TtmThread, setTraceSink, setSoundSink } from "./ttm/interpreter";
+import { TtmThread, setTraceSink, setSoundSink, rngSeeds } from "./ttm/interpreter";
 import { SoundPlayer } from "./sound";
 import {
   AdsScheduler,
@@ -110,6 +110,18 @@ function stopPlayback() {
   releaseIsland();
   // Leaving story mode hands the backdrop back to the TTM interpreter.
   TtmThread.keepBackground = false;
+  // Clear the frame-budget statics too — this is the harness's per-scene reset,
+  // the equivalent of the Go server's traceResetForScene(). They were only ever
+  // cleared at the START of runForFrames, so a scene loaded via window.__load
+  // ran its constructor (fast-forward, LOAD_SCREEN) and its start() with
+  // `traceReachedBudget` still true from the PREVIOUS scene — and
+  // scheduler.tick() bails early on that flag. Found with
+  // tools/oracle-diff/leakcheck.py, which fingerprints every carry-over
+  // candidate at scene start and diffs a warm sweep against a cold one:
+  // traceFrameNo=60/traceReachedBudget=true warm vs 0/false cold.
+  TtmThread.traceFrameNo = 0;
+  TtmThread.traceMaxFrame = 0;
+  TtmThread.traceReachedBudget = false;
   // Cleared here (start of every load) so the harness never observes a stale
   // ready flag from a previous scene while the new one is still loading.
   (window as unknown as { __ready?: boolean }).__ready = false;
@@ -764,6 +776,15 @@ async function main() {
   if (params.has("dump")) {
     // Expose the live scheduler for harness/debug introspection.
     Object.defineProperty(window, "__sched", { get: () => scheduler });
+    // Interpreter statics + RNG seeds, for tools/oracle-diff/leakcheck.py:
+    // everything that survives a scene switch but not a page reload.
+    (window as unknown as { __ttmStatics: () => unknown }).__ttmStatics = () => ({
+      keepBackground: TtmThread.keepBackground,
+      traceFrameNo: TtmThread.traceFrameNo,
+      traceMaxFrame: TtmThread.traceMaxFrame,
+      traceReachedBudget: TtmThread.traceReachedBudget,
+      rng: rngSeeds(),
+    });
 
     // __load(ads, tag): switch scenes IN-PAGE, so a sweep doesn't reload the
     // document per scene. A reload re-parses the app, re-fetches and re-decodes
