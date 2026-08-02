@@ -292,21 +292,29 @@ async function buildIsland(): Promise<void> {
 
 // Tick the island's own animation threads. They run independently of whatever
 // scene or walk is playing, which is why the shore keeps moving during a hold.
-function animateIsland(cost: number): void {
-  if (!story?.island) return;
+// Returns true if anything on the island changed, so the caller knows the
+// screen needs recompositing even when no scene thread drew.
+function animateIsland(cost: number): boolean {
+  if (!story?.island) return false;
   const st = story.driver.island;
+  let changed = false;
 
   story.waveTimer -= cost;
   if (story.waveTimer <= 0) {
     story.waveTimer = ISLAND_TICK;
     story.island.animateWaves(st, renderer.backgroundLayer());
+    changed = true;
   }
 
   story.cloudTimer -= cost;
   if (story.cloudTimer <= 0) {
     story.cloudTimer = ISLAND_TICK;
-    if (story.cloudLayer) story.island.animateClouds(story.cloudLayer);
+    if (story.cloudLayer) {
+      story.island.animateClouds(story.cloudLayer);
+      changed = true;
+    }
   }
+  return changed;
 }
 
 // JOHNWALK.BMP holds the walk/turn sprites. It isn't part of any ADS script, so
@@ -846,11 +854,15 @@ async function main() {
         // 8, i.e. ~8× speed. The trace harness is unaffected: it steps by frame.
         tickCost = scheduler.lastTickCost;
         acc -= TICK_MS * tickCost;
-        // The island's own threads run alongside the scene's. onPresent has
-        // already composited this iteration, so update the island first and let
-        // the next present pick it up — the shore keeps moving during the long
-        // PURGE-loop holds that dominate idle scenes.
-        animateIsland(tickCost);
+        // The island's own threads run alongside the scene's. ads.go calls
+        // grUpdateDisplay EVERY iteration, not only when a thread drew, so the
+        // shore and clouds keep moving through the long PURGE-loop holds that
+        // dominate idle scenes. onPresent only fires when a scene thread draws,
+        // so an island-only change has to composite itself — otherwise the
+        // waves update invisibly on the background layer and the shore appears
+        // frozen for the whole hold (STAND's idle poses, which draw once and
+        // then sit for tens of seconds).
+        if (animateIsland(tickCost)) renderer.present();
         // The script ran dry: re-enter the entry tag, exactly as the engine's
         // `for !shouldExitApp { adsPlay(...) }` does (main.go) — adsPlay returns
         // as soon as no thread is left running, and some tags legitimately run
