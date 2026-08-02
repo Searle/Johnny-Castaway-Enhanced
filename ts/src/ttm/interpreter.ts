@@ -17,6 +17,14 @@ function trace(line: string): void {
   if (traceSink) traceSink(line);
 }
 
+// Optional sound sink for PLAY_SAMPLE. Injected rather than imported so the
+// interpreter stays free of browser/audio dependencies — the trace harness and
+// any headless use simply leave it null and run silent.
+let sound: { play(id: number): void } | null = null;
+export function setSoundSink(s: { play(id: number): void } | null): void {
+  sound = s;
+}
+
 // Two independent deterministic mulberry32 streams mirroring trace.go: one for
 // ADS scene selection (randAds), one for the TTM TIMER opcode (randTimer). Kept
 // separate so TIMER consumption (which varies with concurrent-scene frame
@@ -460,6 +468,20 @@ export class TtmThread {
             trace("  CLEAR");
             this.layer.clear();
           }
+          break;
+
+        case Op.PLAY_SAMPLE:
+          // Deliberately NOT traced. ttm.go's 0xC051 case only debug-prints and
+          // calls soundPlay — it emits no traceOp — so adding a line here would
+          // desynchronise every scene in the draw-call oracle. That does leave
+          // sound outside oracle coverage (INSIGHTS.md rule 3); closing the gap
+          // properly means adding the line to BOTH engines, not just this one.
+          //
+          // suppressDraw guards the fast-forward that replays a prologue to
+          // reach an entry tag: the engine jumps straight to the tag offset and
+          // never runs those opcodes, so firing them would play a burst of
+          // sounds for frames the engine never rendered.
+          if (!this.suppressDraw) sound?.play(a[0]);
           break;
 
         case Op.DRAW_SPRITE:

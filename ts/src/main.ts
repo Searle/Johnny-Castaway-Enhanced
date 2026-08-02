@@ -1,6 +1,7 @@
 import { loadIndex, loadAnimation, type AnimIndex, type IndexEntry, type AdsIndexEntry } from "./manifest";
 import { Canvas2DRenderer } from "./render/canvas2d";
-import { TtmThread, setTraceSink } from "./ttm/interpreter";
+import { TtmThread, setTraceSink, setSoundSink } from "./ttm/interpreter";
+import { SoundPlayer } from "./sound";
 import { AdsScheduler, loadAds, setSchedSink } from "./ads/scheduler";
 import { positionForScene, sceneHasIsland } from "./ads/positioning";
 import { Story, STORY_DAYS } from "./story/story";
@@ -35,8 +36,10 @@ const storySkySelect = $("storySky") as HTMLSelectElement;
 const storyHolidaySelect = $("storyHoliday") as HTMLSelectElement;
 const storyPosSelect = $("storyPos") as HTMLSelectElement;
 const storyNextBtn = $("storyNext") as HTMLButtonElement;
+const soundToggle = $("soundToggle") as HTMLInputElement;
 
 const renderer = new Canvas2DRenderer(canvas);
+const soundPlayer = new SoundPlayer(`${ANIM_ROOT}/_SOUND`);
 
 // Exactly one of these drives playback at a time.
 let thread: TtmThread | null = null;
@@ -171,6 +174,9 @@ async function loadStoryScene(scene: StoryScene): Promise<void> {
     return;
   }
   stopPlayback(true); // tear down the previous scene, keep the story driver
+  // storyPlay() plays sound 17 before any dated scene — the story-beat sting
+  // that marks a day-specific event (MARY's visit, SUZY, the rescue).
+  if (scene.dayNo !== 0) soundPlayer.play(17);
   try {
     const { ads, slots } = await loadAds(ANIM_ROOT, entry.dir);
     if (token !== loadToken) return;
@@ -779,6 +785,12 @@ async function main() {
     };
     return; // no rAF loop in dump mode
   }
+
+  // Audio is armed only outside dump mode: the oracle harnesses run headless
+  // and must stay silent and side-effect-free.
+  setSoundSink(soundPlayer);
+  soundPlayer.init();
+  soundToggle.addEventListener("change", () => soundPlayer.setEnabled(soundToggle.checked));
 
   // Shared render loop.
   let acc = 0;

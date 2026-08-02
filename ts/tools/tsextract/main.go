@@ -142,6 +142,14 @@ func extractAll(res *resources, ttmPalette [16][3]uint8, out string) {
 		fmt.Fprintf(os.Stderr, "[tsextract] skip island: %v\n", err)
 	}
 
+	// Sound effects. Unlike the graphics these do NOT live in RESOURCE.001 —
+	// they are WAVs in the repo's resources/ dir (the Go build embeds them the
+	// same way). Copy them under public/ so vite serves them.
+	if err := copySounds(out); err != nil {
+		skipped = append(skipped, fmt.Sprintf("_SOUND (%v)", err))
+		fmt.Fprintf(os.Stderr, "[tsextract] skip sounds: %v\n", err)
+	}
+
 	ij, err := json.MarshalIndent(struct {
 		TTMs    []indexEntry    `json:"ttms"`
 		ADS     []adsIndexEntry `json:"ads"`
@@ -152,6 +160,36 @@ func extractAll(res *resources, ttmPalette [16][3]uint8, out string) {
 
 	fmt.Printf("extracted %d/%d TTMs and %d ADS scripts (%d skipped) → %s/index.json\n",
 		len(index), len(names), len(adsIndex), len(skipped), out)
+}
+
+// copySounds mirrors the repo's resources/*.wav into <out>/_SOUND/ so the web
+// app can fetch them. sound.go's table has 25 slots with two gaps (11 and 13):
+// those WAVs do not exist in any known release — GJCATCH2.TTM asks for 11 and
+// the engine just prints a warning — so a missing file here is expected, not an
+// error, and only a wholly empty copy is worth reporting.
+func copySounds(out string) error {
+	srcDir := filepath.Join("..", "..", "..", "resources")
+	outDir := filepath.Join(out, "_SOUND")
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		return err
+	}
+	copied := 0
+	for i := 0; i < 25; i++ {
+		name := fmt.Sprintf("sound%d.wav", i)
+		data, err := os.ReadFile(filepath.Join(srcDir, name))
+		if err != nil {
+			continue // ids 11 and 13 legitimately have no audio
+		}
+		if err := os.WriteFile(filepath.Join(outDir, name), data, 0o644); err != nil {
+			return err
+		}
+		copied++
+	}
+	if copied == 0 {
+		return fmt.Errorf("no WAVs found in %s", srcDir)
+	}
+	fmt.Printf("copied %d sound effects → %s\n", copied, outDir)
+	return nil
 }
 
 // islandBmps / islandScrs are the resources island.go loads directly:
