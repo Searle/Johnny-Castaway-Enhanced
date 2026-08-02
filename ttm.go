@@ -318,7 +318,12 @@ func ttmPlay(ttmThread *TTtmThread) {
 			}
 			ttmThread.delay = val
 			ttmThread.timer = val
-			traceOp("DELAY %d", val)
+			// TIMER emits DELAY (the resulting hold) plus the RANGE it drew
+			// from. Without the range, a divergence in the (lo,hi) args is
+			// invisible whenever both engines happen to land on the same value —
+			// and this opcode consumes the TIMER RNG stream, so a desync here
+			// shifts every later delay in the scene.
+			traceOp("DELAY %d range=%d,%d", val, lo, hi)
 		case 0x4004:
 			resName := "?"
 			if ttmThread.ttmSlot != nil {

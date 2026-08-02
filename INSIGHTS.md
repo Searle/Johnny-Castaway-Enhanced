@@ -185,7 +185,7 @@ newest and then demands an uncached browser build, and the sweep dies at launch.
 |---|---|---|---|
 | Draw calls | `uv run --with playwright==1.61.0 python tools/oracle-diff/sweep.py 150` | **66/66** | ~31s |
 | Frame digest | `uv run --with playwright==1.61.0 python tools/oracle-diff/digest.py 60` | **47/66** | ~27s |
-| Pixels | `uv run --with playwright==1.61.0 --with pillow --with numpy python tools/oracle-diff/pixels.py 60` | 48/66 (see below) | ~6m |
+| Pixels | `uv run --with playwright==1.61.0 --with pillow --with numpy python tools/oracle-diff/pixels.py 60` | spot-check only, NOT a gate | ~6m |
 | Walk animation | `npm run walk-check` | **1792/1792** | ~10s |
 | Story logic | `npm run story-check` | pass | ~2s |
 | Cloud/slot order | `uv run --with playwright==1.61.0 python tools/oracle-diff/cloudorder.py 45` | pass | ~50s |
@@ -477,6 +477,61 @@ probe here:
   surfacing as phantom "cloud hidden" pixels one column apart (adjacent x, the
   two cloud greys swapped). Re-composite synchronously with `renderer.present()`
   and snapshot, rather than sampling whatever the loop last painted.
+
+### What the draw-call trace covers — audited, not assumed
+
+The trace is a DRAWN-ELEMENT LIST, and that is the right shape: it compares what
+each engine ASKS FOR, which is rasterizer-independent by construction. Primitive
+GEOMETRY is fully covered on both sides, byte-identical:
+
+```
+DRAW s=13 img=3 @232,301 flip=0     LINE 611,246-611,293 c=15
+RECT x,y WxH c=15                   CIRCLE x,y WxH fg=15 bg=0
+PIXEL @x,y c=15                     CLIPZONE x1,y1-x2,y2
+COLORS fg=15 bg=0                   DELAY 154 range=120,240
+```
+
+`range=` on DELAY was the last real gap: TIMER draws its hold from the seeded
+TIMER stream, and without the range a divergence in the (lo,hi) args was
+invisible whenever both engines happened to land on the same value. Canary-tested
+by perturbing the upper bound by ONE on the port side: **27/66, 39 scenes
+diverge**. Load-bearing, not decorative.
+
+Opcodes that emit NOTHING, symmetrically on both sides (so the oracle is not
+lying, it simply does not cover them):
+
+- `PLAY_SAMPLE` — sound is outside oracle coverage; adding a line to one side
+  alone desynchronises every scene.
+- `SAVE_IMAGE1` / `SAVE_ZONE` — genuine no-ops in the original C too.
+- `RESTORE_ZONE` — silent, but its EFFECT is now visible as `zones=0|1` in the
+  frame digest.
+
+**This is why the pixel oracle is no longer a gate.** The element list already
+proves both engines request identical geometry; the 13 permanent pixel failures
+are purely about how GL and Canvas RASTERIZE that identical geometry (GL's
+diamond-exit rule — sub-pixel dependent and implementation-defined, and
+inconsistent between two lines in the same Go frame). Matching it means emulating
+raylib, not verifying the port. Keep `pixels.py` as an occasional spot-check with
+its 13 documented exceptions; do not read a number from it as a score.
+
+### Identical traces do NOT mean the port is correct
+
+Worth stating plainly, because it is the inference that keeps costing time here.
+Identical draw-call traces prove the INTERPRETER asks for the same things in the
+same order at the same LOGICAL times. They do not prove:
+
+- **compositor structure** — clouds sat in the wrong slot at a perfect 66/66;
+- **presentation timing** — the sweep reads 66/66 on the very STAND scenes where
+  the frame digest currently reports 19 failures;
+- **rasterization** — see the 13 pixel diffs above;
+- **wall-clock pacing** — every text oracle steps by frame with pacing disabled,
+  so a build running at 8x speed passes all of them;
+- **anything outside one ADS tag** — scene selection, episodes and walks are
+  covered separately by `story-check` / `walk-check`, or not at all;
+- **sound.**
+
+The oracles are FALSIFIERS, not proofs. Stacked, they rule out a great deal —
+but the corollary at the top of this file holds: run the thing and look at it.
 
 ### Tooling gaps still open
 

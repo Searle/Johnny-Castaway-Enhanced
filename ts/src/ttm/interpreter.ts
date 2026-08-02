@@ -436,7 +436,13 @@ export class TtmThread {
             hi = a[1];
           this.delayVal = hi > lo ? lo + randTimer(hi - lo + 1) : lo;
           this.timerVal = this.delayVal;
-          trace(`  DELAY ${this.delayVal}`);
+          // Emit the RANGE alongside the resulting hold: without it a
+          // divergence in the (lo,hi) args is invisible whenever both engines
+          // happen to draw the same value, and this opcode consumes the TIMER
+          // RNG stream, so a desync here shifts every later delay in the scene.
+          // SET_DELAY keeps the bare `DELAY n` form — the two must stay
+          // distinguishable in the trace.
+          trace(`  DELAY ${this.delayVal} range=${lo},${hi}`);
           break;
         }
 
