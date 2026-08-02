@@ -107,6 +107,16 @@ function stopPlayback() {
   // Drops the SCENE layers only. The island, clouds and holiday are fixed
   // compositor slots (Step 1); they are released explicitly below.
   renderer.resetLayers();
+  // Saved zones are PER-SCENE. Within a scene only LOAD_SCREEN / RESTORE_ZONE
+  // release them (the interpreter does that), but a new scene starts with none:
+  // in the engine islandInit's grLoadScreen calls grReleaseSavedLayer, and the
+  // -traceserver reaches every scene through it. Without this the slot survived
+  // a window.__load switch, so a scene swept after one that baked scenery began
+  // with zones=1 where a cold reload gives zones=0 — the frame digest reported
+  // it on line 1. Found by diffing a warm against a cold run of the SAME scene:
+  // the schedlogs were byte-identical (889 = 889 lines), so it was never
+  // scheduler state, which is why a state fingerprint could not see it.
+  renderer.clearSlot("savedZones");
   releaseIsland();
   // Leaving story mode hands the backdrop back to the TTM interpreter.
   TtmThread.keepBackground = false;

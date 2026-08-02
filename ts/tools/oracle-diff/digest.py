@@ -55,42 +55,33 @@ import json, os, sys, subprocess, difflib
 import functools
 print = functools.partial(print, flush=True)  # observable in background runs
 
-# Scenes that still diverge.
+# Scenes that still diverge. WALKSTUF:1 is the only one left.
 #
-# WALKSTUF:1 is the only genuine one left. The other 18 (MARY:5, MISCGAG:1/2 and
-# every STAND) were ONE bug, fixed in scheduler.ts: restart() — adsPlay
-# re-entry for a script that ran dry — was re-initialising the island
-# metronomes, which adsInitIsland only ever does ONCE per scene, before the
-# engine's `for !traceReachedBudget { adsPlay(...) }` loop. Resetting bg to 8
-# mid-scene put it half a period out of step, which changed `mini` and therefore
-# the composite count for the rest of the run. Localised by logging the re-arm
-# DECISION on both sides: the sequences were identical for 69 events, then the
-# engine read bg=5 where the port read bg=8. With the fix the schedlogs match
-# exactly, 475 = 475 lines with zero differences.
+# The other 18 (MARY:5, MISCGAG:1/2 and every STAND) were TWO bugs, both fixed:
 #
-# KNOWN HARNESS ISSUE — run with COLD_RELOAD=1 for a true reading. Those 18 pass
-# on a cold reload and still fail in the normal in-page sweep, so state leaks
-# across window.__load, breaking INSIGHTS.md's "__load must stay equivalent to a
-# cold reload" invariant.
+# 1. scheduler.ts — restart(), which is adsPlay re-entry for a script that ran
+#    dry, was re-initialising the island metronomes. adsInitIsland runs ONCE per
+#    scene, BEFORE the engine's `for !traceReachedBudget { adsPlay(...) }` loop,
+#    so re-arming bg mid-scene put it half a period out of step, changed `mini`,
+#    and therefore changed the composite count for the rest of the run.
+#    Localised by logging the re-arm DECISION on both sides: identical for 69
+#    events, then engine bg=5 vs port bg=8.
 #
-# ONE leak has been found and fixed (stale traceFrameNo/traceReachedBudget: see
-# stopPlayback in main.ts) using tools/oracle-diff/leakcheck.py, which
-# fingerprints every carry-over candidate at scene start and diffs a warm sweep
-# against a cold one. Warm and cold fingerprints now match over 20 scenes, yet
-# the warm sweep still fails — so at least one more leak lives in state that
-# probe does not yet cover. Widen FINGERPRINT and run it again; the most likely
-# remaining candidate is the shared `manifest` handed out by loadAnimation's
-# cache (LoadedSheet itself is immutable — name + frames — so the sheets are
-# not the suspect).
+# 2. main.ts — the saved-zones slot survived a window.__load scene switch. Saved
+#    zones are per-scene: within one only LOAD_SCREEN / RESTORE_ZONE release
+#    them, but a NEW scene starts with none (islandInit's grLoadScreen calls
+#    grReleaseSavedLayer, and -traceserver reaches every scene through it). This
+#    one only showed up in the WARM sweep, and only as `zones=1` vs `zones=0` on
+#    line 1 — the schedlogs were byte-identical, 889 = 889 lines, so it was never
+#    scheduler state and a state fingerprint could not see it. Found by diffing a
+#    warm against a cold run of the same scene, which is the "diff DECISION
+#    SEQUENCES" technique from INSIGHTS.md applied to the digest itself.
 #
-# Never grow this list to make a run green.
+# The warm and cold sweeps now agree, so INSIGHTS.md's "__load must stay
+# equivalent to a cold reload" invariant holds again. Never grow this list to
+# make a run green.
 KNOWN_FAILING = {
     ("WALKSTUF", 1),
-    # Pass on COLD_RELOAD=1; fail in the in-page sweep only (see above).
-    ("MARY", 5), ("MISCGAG", 1), ("MISCGAG", 2),
-    ("STAND", 1), ("STAND", 2), ("STAND", 3), ("STAND", 4), ("STAND", 5),
-    ("STAND", 6), ("STAND", 7), ("STAND", 8), ("STAND", 9), ("STAND", 10),
-    ("STAND", 11), ("STAND", 12), ("STAND", 14), ("STAND", 15), ("STAND", 16),
 }
 
 HERE = os.path.dirname(__file__)
