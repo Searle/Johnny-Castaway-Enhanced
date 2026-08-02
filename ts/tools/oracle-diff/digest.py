@@ -56,14 +56,30 @@ import functools
 print = functools.partial(print, flush=True)  # observable in background runs
 
 # Scenes that diverge at the time this oracle landed (RESTRUCTURE-PLAN Step 2).
-# They are ONE root cause, not 19: the port's background/clouds metronomes drift
-# out of phase with the engine's, so `mini` differs (engine 1 then 5, port 4
-# then 2 from identical thread state) and each `mini` is one loop iteration and
-# therefore one composite. Draw calls are unaffected — the sweep reads 66/66 on
-# these same scenes. Owned by Step 3, which rewrites that loop.
+# ONE root cause, not 19: the port's background metronome drifts out of phase
+# with the engine's, so `mini` differs and — since each `mini` is one loop
+# iteration and therefore one composite — the composite COUNT diverges for the
+# rest of the scene. Draw calls are unaffected; the sweep reads 66/66 on these
+# same scenes, which is exactly the blind spot this oracle exists to cover.
 #
-# Listed so a run can distinguish "expected" from "NEW REGRESSION". Shrink this
-# as Step 3 lands; never grow it to make a run green.
+# LOCALISED (Step 4), but not yet fixed. On STAND:2 both engines agree for 247
+# schedlog lines and then split on the metronome alone, with scene-thread state
+# identical (`{1=1:35 r1 t6 d10 st0}`):
+#     engine  bg=5 -> mini 4 -> bg=1   then mini 1,5,3,7
+#     port    bg=8 -> mini 4 -> bg=4   then mini 4,2,4,2
+# The port re-arms bg to 8 where the engine still holds 5. Two hypotheses were
+# TESTED AND REJECTED, both making it worse (546 lines differing instead of a
+# 1-7 length delta), so neither is the answer:
+#   - modelling islandAnimateClouds' isRunning=0 stop (island.go:224) for
+#     zero-cloud episodes: no measurable effect;
+#   - moving the metronome reset out of start() so restart() preserves phase:
+#     wrong, because adsInit() DOES reset them per scene in -traceserver.
+# The remaining suspect is WHEN the port re-arms (`<= 0` before the scene
+# threads run) versus the engine's `== 0` guard combined with islandAnimate
+# actually running on that tick. Measure before changing.
+#
+# Listed so a run can distinguish "expected" from "NEW REGRESSION"; never grow
+# this list to make a run green.
 KNOWN_FAILING = {
     ("MARY", 5), ("MISCGAG", 1), ("MISCGAG", 2),
     ("STAND", 1), ("STAND", 2), ("STAND", 3), ("STAND", 4), ("STAND", 5),
