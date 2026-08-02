@@ -199,6 +199,20 @@ export class AdsScheduler {
     return this.live().length;
   }
 
+  // stopAll ends every running thread immediately, which drains the script and
+  // so ends the current story beat. Only the "skip beat" UI button uses it —
+  // idle STAND poses legitimately hold for tens of seconds, which makes
+  // eyeballing a sequence of scenes painful. Layers are freed as in stopScene.
+  stopAll(): void {
+    for (let i = 0; i < this.threads.length; i++) {
+      const s = this.threads[i];
+      if (!s) continue;
+      this.renderer.removeLayer(s.thread.layerRef);
+      this.threads[i] = null;
+    }
+    this.rebuildLayers();
+  }
+
   // debugScenes reports each running scene's (slot, tag, delay) for the frame
   // dumper — lets us see the per-frame delay alongside the rendered image.
   debugScenes(): { slot: number; tag: number; delay: number }[] {

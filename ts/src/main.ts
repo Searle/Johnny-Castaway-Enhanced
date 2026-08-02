@@ -15,7 +15,7 @@ import { Story, STORY_DAYS } from "./story/story";
 import { Island, ISLAND_DIR, type IslandAssets } from "./story/island";
 import { Walk } from "./story/walk";
 import { SceneFlag, STORY_SCENES, type StoryScene } from "./story/data";
-import type { Layer } from "./render/renderer";
+
 import type { LoadedSheet } from "./manifest";
 
 // One TTM "tick" is ~33ms in the original (the ADS loop's per-tick sleep).
@@ -61,64 +61,63 @@ let scheduler: AdsScheduler | null = null;
 let frames = 0;
 let loadToken = 0;
 
-// Screensaver mode: non-null while the story driver owns playback. It queues
-// scenes and advances when the running one drains; see advanceStory().
+// Screensaver mode: non-null while the story driver owns playback.
+//
+// Sequencing does NOT live here — it lives in storyPlay's statement order, the
+// way story.go expresses it. What remains is the state the engine itself keeps:
+// the story driver, the current beat (for the HUD), the episode's island, and
+// the two island metronomes.
 let story: {
   driver: Story;
-  queue: StoryScene[];
+  // The beat now playing. Read by the HUD; the coroutine owns the sequence.
   current: StoryScene | null;
-  // Where Johnny stands after the scene that just finished, so the next walk
-  // knows where to start. null before the first scene (nothing to walk from).
-  prevSpot: number | null;
-  prevHdg: number;
-  // Non-null while a walk transition is playing instead of a scene.
-  walk: { w: Walk; layer: Layer } | null;
-  // Set synchronously by advanceStory and cleared once the next beat is live.
-  // Advancing involves awaits (sheet decode, ADS load), during which the old
-  // scheduler is still attached and still drained — without this the render
-  // loop would call advanceStory again on the very next frame and eat a scene.
-  advancing: boolean;
-  // The island for the CURRENT episode, plus its animation layers. Rebuilt when
-  // a FINAL scene ends the episode (adsReleaseIsland → adsInitIsland).
+  // The island for the CURRENT episode. Rebuilt per episode
+  // (adsReleaseIsland → adsInitIsland); the island/clouds/holiday SURFACES are
+  // fixed compositor slots (Step 1), not stored here.
   island: Island | null;
-  // (the island, clouds and holiday live in the renderer's fixed slots)
   // Wave/cloud metronomes. Both run on an 8-tick delay in the engine, and they
   // are what quantizes the scheduler — see the metronome note in the scheduler.
   waveTimer: number;
   cloudTimer: number;
 } | null = null;
+// Engine time consumed by the walk frame just drawn, so the pump can charge the
+// island metronomes the same way a scheduler tick charges `mini`.
+let walkCost = 1;
+// The running driver. One coroutine, parked at exactly one statement.
+let storyCo: AsyncGenerator<StoryStep, void, void> | null = null;
+// Set while a `yield "load"` is being awaited, so the pump does not re-enter.
+let storyPumping = false;
 // Module-level copy of the ADS index so story mode can resolve scene names
 // outside main()'s scope. Set once, at startup.
 let adsIndex: AdsIndexEntry[] = [];
 
-// keepStory: story mode calls this between its own beats, where the story
-// driver must survive even though the scheduler is being torn down. Every other
-// caller is switching away from playback entirely and wants it cleared.
-//
-// It also KEEPS THE BACKDROP. In the engine the island is drawn once per
-// episode (adsInitIsland) and survives every scene change and walk within it;
-// only adsReleaseIsland at the end of an episode takes it down. Clearing it
-// between beats left walks playing against black, since a walk runs no TTM and
-// so never issues the LOAD_SCREEN that would restore it.
-function stopPlayback(keepStory = false) {
+// stopPlayback tears playback down completely: every mode switch and every
+// fresh load starts here. There is no `keepStory` variant any more — the story
+// coroutine scopes its own teardown between beats (playScene/playWalk drop the
+// scene layers themselves), so nothing needs to ask this function to spare it.
+function stopPlayback() {
   thread = null;
   scheduler = null;
-  if (!keepStory) story = null;
+  story = null;
+  storyCo = null;
   // Drops the SCENE layers only. The island, clouds and holiday are fixed
-  // compositor slots that outlive every scene drawn on them — no recreation
-  // dance needed to keep them under the next beat's layers.
+  // compositor slots (Step 1); they are released explicitly below.
   renderer.resetLayers();
-  if (!keepStory) {
-    renderer.setBackground(null);
-    renderer.clearSlot("island");
-    renderer.clearSlot("clouds");
-    renderer.clearSlot("holiday");
-    // Leaving story mode hands the backdrop back to the TTM interpreter.
-    TtmThread.keepBackground = false;
-  }
+  releaseIsland();
+  // Leaving story mode hands the backdrop back to the TTM interpreter.
+  TtmThread.keepBackground = false;
   // Cleared here (start of every load) so the harness never observes a stale
   // ready flag from a previous scene while the new one is still loading.
   (window as unknown as { __ready?: boolean }).__ready = false;
+}
+
+// releaseIsland is adsReleaseIsland: the end of an episode takes the island,
+// clouds and holiday down. Within an episode they outlive every scene and walk.
+function releaseIsland() {
+  renderer.setBackground(null);
+  renderer.clearSlot("island");
+  renderer.clearSlot("clouds");
+  renderer.clearSlot("holiday");
 }
 
 // ---- TTM single-scene mode ----
@@ -173,47 +172,6 @@ async function loadAdsScript(entry: AdsIndexEntry, entryTag: number) {
 // ---- screensaver (story) mode ----
 
 const STORY_KEY = "jc.story.progress";
-
-// Play one story scene. Unlike the ADS viewer this does NOT loop on drain —
-// draining is precisely the signal that the beat is over and the next one
-// should start (advanceStory below).
-async function loadStoryScene(scene: StoryScene): Promise<void> {
-  const token = ++loadToken;
-  const entry = (adsIndex ?? []).find((a) => a.name === scene.adsName);
-  if (!entry) {
-    hud.textContent = `story: missing ${scene.adsName}`;
-    return;
-  }
-  stopPlayback(true); // tear down the previous scene, keep the story driver
-  // storyPlay() plays sound 17 before any dated scene — the story-beat sting
-  // that marks a day-specific event (MARY's visit, SUZY, the rescue).
-  if (scene.dayNo !== 0) soundPlayer.play(17);
-  try {
-    const { ads, slots } = await loadAds(ANIM_ROOT, entry.dir);
-    if (token !== loadToken) return;
-    scheduler = new AdsScheduler(ads, slots, renderer, {
-      // With a REAL island we can finally honour the engine's positioning:
-      // ttmDx = islandState.xPos + (LEFT_ISLAND ? 272 : 0), the same offset the
-      // island itself was drawn at, so sprites stay on it wherever it landed.
-      // (The old static-backdrop port had to pin this to 0 — see positioning.ts.)
-      position: () => {
-        if (!story?.island) return positionForScene(entry.name, 0, 0);
-        const st = story.driver.island;
-        const xOffset = (scene.flags & SceneFlag.LEFT_ISLAND) !== 0 ? 272 : 0;
-        return { dx: st.xPos + xOffset, dy: st.yPos };
-      },
-      island: sceneHasIsland(entry.name, scene.adsTag),
-      adsName: entry.name,
-    });
-    scheduler.start(scene.adsTag);
-    frames = 0;
-    renderer.present();
-    (window as unknown as { __ready?: boolean }).__ready = true;
-  } catch (err) {
-    if (token === loadToken) hud.textContent = `error: ${(err as Error).message}`;
-    console.error(err);
-  }
-}
 
 // ---- island ----
 
@@ -340,97 +298,171 @@ async function ensureWalkSheet(): Promise<LoadedSheet | null> {
   return walkSheet;
 }
 
-// Start a walk from the previous scene's end spot to the next scene's start
-// spot. Returns false if no walk applies (first scene of a run, same spot and
-// heading, or the sheet is unavailable) — the caller then goes straight to the
-// scene, exactly as storyPlay() skips adsPlayWalk when prevSpot is -1.
-async function startWalk(to: StoryScene): Promise<boolean> {
-  if (!story || story.prevSpot === null) return false;
-  const sheet = await ensureWalkSheet();
-  if (!sheet) return false;
-  const from = story.prevSpot;
-  const fromHdg = story.prevHdg;
-  if (from === to.spotStart && fromHdg === to.hdgStart) return false;
+// storyPlay is the screensaver driver, expressed the way story.go expresses it:
+// a LOOP whose sequencing is statement order. Compare story.go:134-272 — build
+// an episode, walk to each scene, play it, carry the spot forward, release the
+// island at the end, repeat.
+//
+// It is an async GENERATOR rather than a plain async function, and that is the
+// load-bearing detail. A plain `await` would tie playback to promise
+// scheduling, and the frame-dump harness (?dump) drives the engine
+// SYNCHRONOUSLY, one displayed frame at a time. Yielding instead lets one
+// pump() call advance the coroutine by exactly one engine step, so the same
+// code serves both the rAF loop and the harness.
+//
+// What each yield means:
+//   yield "load"  — an asset load is in flight; the pump awaits it and resumes.
+//   yield "tick"  — one engine step is due (a scene tick or a walk frame). The
+//                   pump charges the engine clock and returns.
+//
+// The flags this deletes are the point: `advancing` (no re-entrancy — the
+// coroutine is parked at one statement), `keepStory` (teardown is scoped to
+// playScene's lifetime), `walk` as a mode selector (a walk is just what the
+// coroutine is currently doing), and the isDrained branch in the render loop
+// (it becomes playScene's exit condition).
+type StoryStep = "load" | "tick";
 
-  stopPlayback(true); // drop the finished scene's layer, keep the story driver
+async function* storyPlay(): AsyncGenerator<StoryStep, void, void> {
+  for (;;) {
+    // A fresh episode re-rolls the island (tide, position, raft, holiday), so
+    // it is rebuilt here — adsInitIsland at the top, adsReleaseIsland at the
+    // bottom, exactly bracketing storyPlay's outer loop body.
+    const episode = story!.driver.buildEpisode();
+    applyIslandOverrides();
+    const islandLoad = buildIsland();
+    yield "load";
+    await islandLoad;
+    if (!story) return;
+
+    // story.go:168 — reset ONCE per episode, never per scene. The island may
+    // have moved, so there is no continuity with wherever the last episode
+    // left Johnny standing.
+    let prevSpot: number | null = null;
+    let prevHdg = 0;
+
+    for (const scene of episode) {
+      if (!story) return;
+      story.current = scene;
+
+      // story.go:207 — ttmDx is set to the DESTINATION scene's offset BEFORE
+      // the walk to it, so a walk crossing between the island's LEFT_ISLAND and
+      // non-LEFT_ISLAND halves renders at the right half's X.
+      if (prevSpot !== null) {
+        yield* playWalk(prevSpot, prevHdg, scene);
+        if (!story) return;
+      }
+
+      // The story-beat sting that marks a day-specific event.
+      if (scene.dayNo !== 0) soundPlayer.play(17);
+
+      yield* playScene(scene);
+      if (!story) return;
+
+      // story.go:227 — UNCONDITIONAL, including after the FINAL scene. Clearing
+      // it on FINAL (an easy-looking "the episode is over" optimisation)
+      // silently deletes the walk into the next episode's first scene, and
+      // reads on screen as Johnny teleporting across the island.
+      prevSpot = scene.spotEnd;
+      prevHdg = scene.hdgEnd;
+    }
+
+    releaseIsland();
+  }
+}
+
+// playWalk runs one walk transition to `to`, resolving when walkAnimate has no
+// frame left. Mirrors adsPlayWalk: it blocks the caller for the walk's whole
+// duration, which is why the coroutine can simply carry on afterwards.
+async function* playWalk(
+  from: number,
+  fromHdg: number,
+  to: StoryScene,
+): AsyncGenerator<StoryStep, void, void> {
+  const sheetLoad = ensureWalkSheet();
+  yield "load";
+  const sheet = await sheetLoad;
+  if (!sheet || !story) return;
+  // Same spot AND heading: nothing to walk, exactly as storyPlay skips
+  // adsPlayWalk when there is no distance to cover.
+  if (from === to.spotStart && fromHdg === to.hdgStart) return;
+
+  // Drop the finished scene's layers; the island slots survive (Step 1).
+  scheduler = null;
+  renderer.resetLayers();
   const layer = renderer.newLayer();
-  // adsPlayWalk sets grDx/grDy to the DESTINATION scene's offset before walking,
-  // so a walk toward a LEFT_ISLAND scene renders on the right half of the island.
   if (story.island) {
     const st = story.driver.island;
     const xOffset = (to.flags & SceneFlag.LEFT_ISLAND) !== 0 ? 272 : 0;
     layer.setOrigin(st.xPos + xOffset, st.yPos);
   }
-  story.walk = { w: new Walk(from, fromHdg, to.spotStart, to.hdgStart, Math.random), layer };
+  const w = new Walk(from, fromHdg, to.spotStart, to.hdgStart, Math.random);
   frames = 0;
-  (window as unknown as { __ready?: boolean }).__ready = true;
-  return true;
-}
+  markReady();
 
-// Advance the running walk by one engine tick. Returns the tick cost, or null
-// once the walk is finished (which hands control back to scene playback).
-function stepWalk(): number | null {
-  if (!story?.walk || !walkSheet) return null;
-  const { w, layer } = story.walk;
-  const f = w.step();
-  if (!f) return null;
-
-  layer.clear();
-  const img = walkSheet.frames[f.spriteNo];
-  if (img) layer.drawSprite(img, f.x, f.y, f.flip);
-  // Walking behind the palm: redraw trunk + leaves ON TOP of Johnny, exactly as
-  // walkAnimate does. Now possible because the island owns the real sprites.
-  if (f.behindTree && story.island) story.island.drawPalmOver(layer);
-  // The caller presents (after ticking the island), so the shore and clouds
-  // animate during walks too.
-  frames++;
-  return f.delay;
-}
-
-// Pull the next scene, building a fresh episode when the current one is spent.
-// Walks first (if there is somewhere to walk from), then plays the scene.
-function advanceStory(): void {
-  if (!story || story.advancing) return;
-  // A fresh episode re-rolls the island (tide, raft, position, holiday), so it
-  // has to be rebuilt — adsReleaseIsland + adsInitIsland around storyPlay's loop.
-  const newEpisode = story.queue.length === 0;
-  if (newEpisode) {
-    story.queue = story.driver.buildEpisode();
-    applyIslandOverrides();
-    // storyPlay resets prevSpot to -1 at the top of each episode: the island is
-    // rebuilt (possibly at a new position, tide and raft stage) and there is no
-    // continuity with wherever the last episode left Johnny standing.
-    story.prevSpot = null;
-    story.prevHdg = 0;
+  for (;;) {
+    const f = w.step();
+    if (!f) return; // walkAnimate returned delay 0 — the walk is over
+    layer.clear();
+    const img = sheet.frames[f.spriteNo];
+    if (img) layer.drawSprite(img, f.x, f.y, f.flip);
+    // Walking behind the palm: redraw trunk + leaves ON TOP of Johnny, as
+    // walkAnimate does.
+    if (f.behindTree && story?.island) story.island.drawPalmOver(layer);
+    frames++;
+    walkCost = Math.max(1, f.delay);
+    yield "tick";
+    if (!story) return;
   }
-  const next = story.queue.shift() ?? null;
-  story.current = next;
-  if (!next) return;
-  story.advancing = true;
-  void (async () => {
-    try {
-      if (newEpisode) await buildIsland();
-      // A walk, if there is one, hands off to the scene when it finishes.
-      if (await startWalk(next)) return;
-      await loadStoryScene(next);
-    } finally {
-      if (story) story.advancing = false;
-    }
-  })();
 }
 
-// Called when a walk finishes: play the scene it was heading to.
-function finishWalk(): void {
+// playScene plays one story beat, resolving when its ADS script DRAINS. That
+// drain is adsPlay returning — the engine's own `for numThreads != 0` exit —
+// so the coroutine resumes at exactly the point storyPlay would.
+async function* playScene(scene: StoryScene): AsyncGenerator<StoryStep, void, void> {
+  const entry = (adsIndex ?? []).find((a) => a.name === scene.adsName);
+  if (!entry) {
+    hud.textContent = `story: missing ${scene.adsName}`;
+    return;
+  }
+  scheduler = null;
+  renderer.resetLayers();
+  const load = loadAds(ANIM_ROOT, entry.dir);
+  yield "load";
+  const { ads, slots } = await load;
   if (!story) return;
-  story.walk = null;
-  const next = story.current;
-  if (!next) return;
-  // Same in-flight guard as advanceStory: the load awaits, and until it lands
-  // there is no walk and no live scheduler for the loop to see.
-  story.advancing = true;
-  void loadStoryScene(next).finally(() => {
-    if (story) story.advancing = false;
+
+  const sched = new AdsScheduler(ads, slots, renderer, {
+    // With a REAL island we honour the engine's positioning:
+    // ttmDx = islandState.xPos + (LEFT_ISLAND ? 272 : 0).
+    position: () => {
+      if (!story?.island) return positionForScene(entry.name, 0, 0);
+      const st = story.driver.island;
+      const xOffset = (scene.flags & SceneFlag.LEFT_ISLAND) !== 0 ? 272 : 0;
+      return { dx: st.xPos + xOffset, dy: st.yPos };
+    },
+    island: sceneHasIsland(entry.name, scene.adsTag),
+    adsName: entry.name,
   });
+  sched.onPresent = () => {
+    renderer.present();
+    frames++;
+  };
+  sched.start(scene.adsTag);
+  scheduler = sched;
+  frames = 0;
+  renderer.present();
+  markReady();
+
+  // Tick until the script drains. A beat that ends via END is just as finished
+  // as one that runs dry, and both simply return here.
+  while (scheduler === sched && !sched.isDrained) {
+    yield "tick";
+    if (!story) return;
+  }
+}
+
+function markReady(): void {
+  (window as unknown as { __ready?: boolean }).__ready = true;
 }
 
 function startStory(): void {
@@ -458,19 +490,52 @@ function startStory(): void {
       }
     },
   });
-  story = {
-    driver,
-    queue: [],
-    current: null,
-    prevSpot: null,
-    prevHdg: 0,
-    walk: null,
-    advancing: false,
-    island: null,
-    waveTimer: 0,
-    cloudTimer: 0,
-  };
-  advanceStory();
+  story = { driver, current: null, island: null, waveTimer: 0, cloudTimer: 0 };
+  storyCo = storyPlay();
+  storyPumping = false;
+}
+
+// pumpStory advances the driver by ONE step and returns the engine time that
+// step consumed, so the caller can charge the clock. This is the only thing the
+// render loop has to know about the screensaver.
+//
+// A "load" yield parks the coroutine on a promise; nothing is charged and the
+// pump re-enters when it resolves. A "tick" yield means one engine step is due:
+// a scene tick (charged `mini`) or a walk frame (charged its own delay).
+function pumpStory(): number {
+  if (!storyCo || storyPumping) return 0;
+  // A live scheduler means the coroutine is parked in playScene's tick loop.
+  // Run the engine step HERE, then resume the coroutine so it can re-test
+  // isDrained — ads.go's own `for numThreads != 0` exit condition.
+  let cost = 1;
+  if (scheduler) {
+    scheduler.tick(); // presents via onPresent, at the grUpdateDisplay point
+    cost = scheduler.lastTickCost;
+  } else {
+    cost = walkCost;
+  }
+  // The island's threads run alongside whatever is playing, so the shore and
+  // clouds keep moving through walks and through the long PURGE-loop holds that
+  // dominate idle scenes.
+  const islandChanged = animateIsland(cost);
+  // ads.go calls grUpdateDisplay EVERY iteration, not only when a thread drew.
+  // The scheduler already presented if a scene drew; present here for the
+  // island-only case and for walks (which own their own layer). Never after a
+  // REAP: onPresent has already shown that scene's final frame, and
+  // re-compositing the same iteration with the layer freed is the one-frame
+  // blank that reads as Johnny vanishing at a scene change.
+  if (!scheduler) {
+    renderer.present();
+  } else if (islandChanged && !scheduler.lastTickPresented && !scheduler.lastTickReaped) {
+    renderer.present();
+  }
+
+  storyPumping = true;
+  void storyCo.next().then((r) => {
+    storyPumping = false;
+    if (r.done) storyCo = null;
+  });
+  return cost;
 }
 
 function dayOfYearNow(): number {
@@ -619,16 +684,14 @@ async function main() {
   // STAND poses legitimately hold for tens of seconds, which makes eyeballing
   // a sequence of scenes painful.
   storyNextBtn.addEventListener("click", () => {
-    if (!story) return;
-    story.walk = null;
-    story.advancing = false;
-    // Carry the spot over as a natural scene end would, otherwise skipping a
-    // beat leaves prevSpot stale and every subsequent walk is skipped.
-    if (story.current) {
-      story.prevSpot = story.current.spotEnd;
-      story.prevHdg = story.current.hdgEnd;
-    }
-    advanceStory();
+    if (!story || !scheduler) return;
+    // Skipping is now just "end this beat": the coroutine is parked in
+    // playScene's `while (!isDrained)` loop, so stopping every thread makes it
+    // fall through and carry on with the walk to the next scene. prevSpot
+    // carries over by itself — it is a local in storyPlay, advanced after
+    // playScene returns, exactly as story.go:227 does it. (The old flag-based
+    // driver needed three statements here and got the carry-over wrong.)
+    scheduler.stopAll();
   });
 
   function reloadCurrent() {
@@ -864,14 +927,15 @@ async function main() {
   soundPlayer.init();
   soundToggle.addEventListener("change", () => soundPlayer.setEnabled(soundToggle.checked));
 
-  // Shared render loop.
+  // Shared render loop. Its only job now is: pump whatever is playing, advance
+  // the clock by what that step cost, and repaint the HUD. Sequencing lives in
+  // storyPlay (screensaver) or in the scheduler (ADS viewer) — not here.
   let acc = 0;
   let last = performance.now();
-  // Composite at the scheduler's grUpdateDisplay point (inside tick, before the
-  // reap frees a finished scene's layer) rather than after the tick returns —
-  // otherwise a scene's final frame is lost (BUILDING.ADS tag 1). This also
-  // means each tick in the catch-up loop below presents its own frame instead
-  // of only the last one surviving.
+  // The ADS viewer composites at the scheduler's grUpdateDisplay point (inside
+  // tick, BEFORE the reap frees a finished scene's layer); presenting after
+  // tick() returns loses each scene's final frame. Story mode attaches its own
+  // in playScene.
   const attachPresent = () => {
     if (scheduler && !scheduler.onPresent) {
       scheduler.onPresent = () => {
@@ -888,87 +952,28 @@ async function main() {
     let changed = false;
     let budget = 10;
     while (acc >= TICK_MS && budget-- > 0) {
-      // Engine time consumed by this iteration, charged to the island's wave
-      // and cloud metronomes so they keep running through scenes, walks and
-      // long holds alike (they are separate threads in the engine).
-      let tickCost = 1;
       if (thread) {
         acc -= TICK_MS;
         if (thread.tick()) changed = true;
-      } else if (story?.walk) {
-        // A walk transition owns playback: no scheduler, no ADS threads, just
-        // the walk state machine holding each frame for its own delay. Charge
-        // the held time the same way a scheduler tick charges `mini`.
-        const cost = stepWalk();
-        if (cost === null) {
-          finishWalk();
-          break;
-        }
-        tickCost = Math.max(1, cost);
-        acc -= TICK_MS * tickCost;
-        animateIsland(tickCost);
-        // The walk redraws its own layer each frame; present after the island
-        // has updated so the shore and clouds move during the walk too.
-        renderer.present();
+      } else if (storyCo) {
+        // One engine step of the screensaver, charged at its real cost: a
+        // scheduler tick advances the clock by `mini` time-units (ads.go then
+        // sleeps mini * 20ms), a walk frame by its own delay. Charging 1 here
+        // instead runs playback `mini` times too fast — with clouds running
+        // mini is usually 8, i.e. ~8x speed — and no text oracle can see it.
+        const cost = pumpStory();
+        if (cost === 0) break; // a load is in flight; resume when it lands
+        acc -= TICK_MS * cost;
       } else if (scheduler) {
         scheduler.tick(); // presents via onPresent
-        // One scheduler tick advances the engine clock by `mini` time-units
-        // (ads.go then sleeps mini * 20ms), NOT by one. Charge the real cost or
-        // playback runs `mini`× too fast — with clouds running, mini is usually
-        // 8, i.e. ~8× speed. The trace harness is unaffected: it steps by frame.
-        tickCost = scheduler.lastTickCost;
-        acc -= TICK_MS * tickCost;
-        // The island's own threads run alongside the scene's. ads.go calls
-        // grUpdateDisplay EVERY iteration, not only when a thread drew, so the
-        // shore and clouds keep moving through the long PURGE-loop holds that
-        // dominate idle scenes. onPresent only fires when a scene thread draws,
-        // so an island-only change has to composite itself — otherwise the
-        // waves update invisibly on the background layer and the shore appears
-        // frozen for the whole hold (STAND's idle poses, which draw once and
-        // then sit for tens of seconds).
-        //
-        // Only when the tick did NOT already composite and did NOT reap. A reap
-        // frees the finished thread's layer AFTER onPresent has shown that
-        // scene's last frame, so presenting again here re-composites the same
-        // moment with the layer gone — a blank or half-empty frame, i.e. Johnny
-        // vanishing for one frame at a scene change. Measured: presents with 0
-        // layers, and 2→1 layer drops, exactly on transitions.
-        const islandChanged = animateIsland(tickCost);
-        if (islandChanged && !scheduler.lastTickPresented && !scheduler.lastTickReaped) {
-          renderer.present();
-        }
+        acc -= TICK_MS * scheduler.lastTickCost;
         // The script ran dry: re-enter the entry tag, exactly as the engine's
-        // `for !shouldExitApp { adsPlay(...) }` does (main.go) — adsPlay returns
-        // as soon as no thread is left running, and some tags legitimately run
-        // dry (VISITOR:4, STAND:14). Without this the scheduler ticks a dead
-        // thread list forever: tick() returns at once, nothing ever presents
-        // again, and it reads as a hang. It never reported "(stopped)" either,
-        // because a tag that drains without an END leaves `stopped` false.
-        //
+        // `for !shouldExitApp { adsPlay(...) }` does (main.go). Some tags
+        // legitimately run dry (VISITOR:4, STAND:14); without this the
+        // scheduler ticks a dead thread list forever and it reads as a hang.
         // Guard against a tag that emits NOTHING per pass, which would restart
         // every iteration and spin — the same check the trace path uses.
         if (scheduler.isDrained) {
-          // Story mode: a drained script means this story beat is over, so move
-          // to the next scene rather than replaying this one. `isStopped` is not
-          // required here — a beat that ends via END is just as finished as one
-          // that runs dry, and both should advance.
-          if (story) {
-            if (frames === 0) break; // nothing played yet: let it start before advancing
-            // Remember where this beat left Johnny so the next walk starts
-            // there. storyPlay does this unconditionally after every scene
-            // (`prevSpot = scene.spotEnd`) and resets to -1 only once per
-            // EPISODE, so the carry-over must survive a FINAL scene too —
-            // an earlier version cleared it on FINAL, which skipped the walk
-            // into the next episode's first scene entirely (Johnny teleporting
-            // from fishing on the right to building on the left).
-            const done = story.current;
-            if (done) {
-              story.prevSpot = done.spotEnd;
-              story.prevHdg = done.hdgEnd;
-            }
-            advanceStory();
-            break;
-          }
           if (scheduler.isStopped) break;
           if (frames === framesAtPassStart) break;
           framesAtPassStart = frames;
@@ -991,9 +996,8 @@ async function main() {
     } else if (story) {
       const s = story.current;
       const day = story.driver.currentDay;
-      const left = story.queue.length;
-      const what = story.walk ? `walking → ${s?.adsName ?? "?"}` : s ? `${s.adsName} tag ${s.adsTag}` : "starting…";
-      hud.textContent = `screensaver — day ${day} — ${what} — ${left} scene(s) left — frame ${frames}`;
+      const what = !scheduler && s ? `walking → ${s.adsName}` : s ? `${s.adsName} tag ${s.adsTag}` : "starting…";
+      hud.textContent = `screensaver — day ${day} — ${what} — frame ${frames}`;
     } else if (scheduler) {
       hud.textContent = `${adsSelect.value} — ${scheduler.runningCount} scene(s) — frame ${frames}${scheduler.isStopped ? " (stopped)" : ""}`;
     }
