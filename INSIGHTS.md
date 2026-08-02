@@ -3,9 +3,20 @@
 Hard facts and non-obvious learnings for future work on this repo. Not a
 changelog — only things that will save time or prevent repeating mistakes.
 
+**Current state of the TS port (branch `ts`):** the scene viewer and screensaver
+mode both run — story scene selection, walk transitions, procedural island
+(tide/raft/night/holidays/VARPOS), and sound. The ported ALGORITHMS are verified
+correct by the oracles below. The DRIVER that glues them together is not: it is
+an event-driven state machine where the engine is a blocking loop, and that
+mismatch is where every human-reported bug has come from. **Before adding
+features, read `RESTRUCTURE-PLAN.md`** — it diagnoses this and gives the
+step-by-step fix (fixed-slot compositor → frame-digest oracle → coroutine driver
+→ flag removal). Doing more feature work on the current structure will keep
+producing the same class of bug.
+
 ## How to work on this repo (read this first)
 
-Five rules, each learned the expensive way. They are about METHOD, not about the
+Seven rules, each learned the expensive way. They are about METHOD, not about the
 engine, and they generalise past the parts of the codebase that produced them.
 
 1. **Distrust a good score before you trust the code.** A lenient comparison
@@ -31,10 +42,34 @@ engine, and they generalise past the parts of the codebase that produced them.
    ("63/66", "RANDOM stream desync", "alwaysOnTopThreadTags is a workaround we
    can delete"). Each was *inferred* from downstream damage rather than
    measured. Ten minutes of instrumentation beat each of them.
+6. **Port the engine's STRUCTURE, not just its algorithms.** `story.go` is a
+   blocking loop: `adsPlayWalk` blocks until the walk ends, `adsPlay` until the
+   scene ends, and sequencing is simply statement order. Re-expressing that as an
+   event-driven rAF state machine moved sequencing into flags (`advancing`,
+   `keepStory`, `walk !== null`, `isDrained`, `lastTickReaped`), and *every*
+   screensaver bug a human has found lives in that translation — never in the
+   ported algorithms, which the oracles confirm are right. Each fix added another
+   flag and made the next bug likelier. **This is 1992 code: if the port is
+   larger and less correct than the original, the port is wrong.** Measure it —
+   engine driver (storyPlay + adsPlayWalk + ADS loop) is 265 lines; the port's
+   `main.ts` reached 955 doing less. See `RESTRUCTURE-PLAN.md`.
+7. **A new flag is a design smell, not a fix.** Before adding one, find the
+   engine line that corresponds to it. If there isn't one, the flag is
+   compensating for a structural mismatch — fix the structure. `prevSpot` being
+   cleared on FINAL scenes (a port invention with no engine equivalent) made
+   Johnny teleport across the island.
 
-Corollary for the human-facing side: **the oracles cannot see everything.** Two
-of the three rendering bugs found were reported by a person looking at the
-screen, at a moment both sweeps read green. Run the thing and look at it.
+Corollary for the human-facing side: **the oracles cannot see everything.** Every
+screensaver-era bug was reported by a person looking at the screen while both
+sweeps read green. Run the thing and look at it.
+
+Corollary on measurement: **a probe that reports "no problem" is worthless until
+you have seen it report a problem.** Two probes this project silently lied: a
+canvas-blit pixel sampler reported 0 dropouts on a build that provably had them
+(a frame overwritten within the same rAF tick never reaches that hook), and a
+walk-decision counter measured its own test button's bug rather than the reported
+one. Run the control case on known-bad code first; if it passes, the probe is
+broken, not the code.
 
 ## Build / platform
 
@@ -141,21 +176,33 @@ screen, at a moment both sweeps read green. Run the thing and look at it.
 
 ### START HERE — current state and how to reproduce it
 
-Two independent oracles. Both need a vite server on `:5199`
+Four checks. The browser ones need a vite server on `:5199`
 (`npx vite --port 5199 --strictPort`, from `ts/`) and a built `JohnnyCastaway2026`.
 **Pin Playwright to 1.61.0** — plain `--with playwright` resolves to whatever is
 newest and then demands an uncached browser build, and the sweep dies at launch.
 
-| Oracle | Command (from `ts/`) | Status | Runtime |
+| Check | Command (from `ts/`) | Status | Runtime |
 |---|---|---|---|
 | Draw calls | `uv run --with playwright==1.61.0 python tools/oracle-diff/sweep.py 150` | **66/66** | ~31s |
 | Pixels | `uv run --with playwright==1.61.0 --with pillow --with numpy python tools/oracle-diff/pixels.py 60` | **53/66** | ~6m |
+| Walk animation | `npm run walk-check` | **1792/1792** | ~10s |
+| Story logic | `npm run story-check` | pass | ~2s |
+
+`walk-check` diffs the walk state machine frame-for-frame against a Go reference
+over every spot pair and start/end heading. **Caveat:** that reference
+(`ts/tools/walkoracle/main.go`) RE-HOSTS walk.go's control flow rather than
+calling it (walk.go's `data` is a raw C pointer, and walkAnimate is entangled with
+the renderer). It reads the real tables, so the DATA cannot drift — but if
+walk.go's logic changes, update the reference or the oracle silently proves
+nothing. `story-check` covers episode structure, flag constraints, day gating and
+the calendar; it is the only check on scene SELECTION.
 
 The draw-call oracle proves the INTERPRETER is right (same sprites, coords,
 order, timing, and — since the coverage audit below — the state opcodes too). It
 is structurally blind to the COMPOSITOR: layer z-order, layer lifetime and WHEN a
-frame is presented are all invisible to it, which is why the pixel oracle exists.
-Every rendering bug found so far passed the draw-call diff untouched.
+frame is presented are all invisible to it. The pixel oracle only partly covers
+that gap — see "Tooling gaps still open", and `RESTRUCTURE-PLAN.md` for the
+frame-digest oracle that should replace it as the gate.
 
 Supporting tools, each built to answer a question the sweeps could not:
 - `schedlog.py` + `JC_SCHED_LOG=1` — dump both engines' SCHEDULER DECISION
@@ -329,6 +376,16 @@ Two harness rules learned here, both of which silently corrupted results:
 
 ### Tooling gaps still open
 
+**The big one: nothing verifies COMPOSITE STRUCTURE or PRESENTATION TIMING.**
+Both oracles check what the interpreter *computes*; neither can see z-order,
+layer lifetime, or when a frame is shown. Every screensaver-era bug lived in that
+blind spot — a wedged render loop, frozen island animation, a one-frame blank
+after a reap, and clouds composited in the wrong slot (which went unnoticed
+entirely). The fix is a per-frame text digest emitted by both engines and diffed
+like `sweep.py`; design is in `RESTRUCTURE-PLAN.md` Step 2. The pixel oracle is
+NOT a substitute: it is slow (~6 min), carries 13 permanently-failing scenes, and
+caught none of them.
+
 `blitcheck.py` covers sprite blits; there is **no single-primitive probe** for
 LINE/CIRCLE/RECT in a live layer, which is why the remaining GL tie-break residue
 had to be reverse-engineered from composited frames.
@@ -367,12 +424,81 @@ engine itself emits draw-less frames (BUILDING:2's `FRAME 0` is a bare
   negative random `xPos` (~ -114..-222) applied to BOTH; LEFT_ISLAND scenes net
   to `-272 + 272 = 0`; plain scenes are 0. So the net sprite offset is 0 for
   LEFT_ISLAND/plain, and a shared negative shift for VARPOS.
-- Consequence for a static-backdrop port (can't reposition the baked island):
-  the only offset that keeps sprites aligned is **grDx = 0**. Do NOT add +272
-  for "date" scenes — SMDATE's MARY.ADS entry (tag 1/24) is VARPOS, not
-  LEFT_ISLAND, and LEFT_ISLAND nets to 0 anyway. Correct VARPOS positioning
-  needs the story calendar (`story.go`) AND redrawing the island at the chosen
-  xPos, not the baked ISLETEMP.
+- A port using a STATIC baked backdrop (ISLETEMP.SCR) cannot reposition the
+  island, so its only self-consistent offset is **grDx = 0**; correct VARPOS
+  needs the island drawn procedurally at the chosen xPos. The TS port now does
+  that (see the island section below) and applies the real
+  `xPos + (LEFT_ISLAND ? 272 : 0)`. Do NOT add +272 for "date" scenes — SMDATE's
+  MARY.ADS entry (tag 1/24) is VARPOS, not LEFT_ISLAND, and LEFT_ISLAND nets
+  to 0 anyway.
+
+## The composite stack is FIXED and ordered (grUpdateDisplay)
+
+`grUpdateDisplay` (graphics.go:672) blits exactly five slots, in this order:
+
+```
+1 background surface (grBackgroundSur — the island is PAINTED ONTO this)
+2 clouds             (ttmCloudsThread.ttmLayer, only if isRunning != 0)
+3 saved zones        (grSavedZonesLayer)
+4 thread layers      (ttmThreads[0..N], in slot order)
+5 holiday            (ttmHolidayThread.ttmLayer, only if isRunning != 0)
+```
+
+- Clouds sit **above the island and below everything else** — including saved
+  zones. A port that pushes clouds into the same dynamic array as scene threads
+  has no way to express this and will mis-order them. Model slots 1/2/3/5 as
+  named surfaces and only slot 4 as an array.
+- The island is not a backdrop image, it is drawn onto a *surface* that the wave
+  animation keeps repainting. A renderer whose "background" is an immutable
+  bitmap cannot host it.
+- Slots 1, 2 and 5 must SURVIVE a scene change; only slot 4 is torn down per
+  scene. The island outlives every scene drawn on it (`adsInitIsland` once per
+  episode, `adsReleaseIsland` at the end).
+- The pixel oracle's `traceShots` path deliberately skips slots 1 and 2 (island +
+  clouds) — procedural content that would otherwise swamp the sprite diff. Their
+  TIMERS still run, since those quantize the scheduler's `mini` clock.
+
+## Screensaver driver (storyPlay) — rules a port gets wrong by default
+
+- **`prevSpot` is set after EVERY scene, unconditionally** (`story.go:227`), and
+  reset to -1 only once per EPISODE (`story.go:168`). The FINAL scene is walked
+  to like any other (`story.go:248`). Clearing it on FINAL — an easy-looking
+  "the episode is over" optimisation — silently deletes the walk into the next
+  scene and reads on screen as Johnny teleporting across the island.
+- **`ttmDx` is set to the DESTINATION scene's offset BEFORE the walk to it**
+  (`story.go:207`), not after. Otherwise a walk crossing between the island's
+  LEFT_ISLAND and non-LEFT_ISLAND halves renders at the wrong half's X.
+- An episode is: pick a FINAL scene → if it lacks FIRST, play `6+rand(14)`
+  ordinary scenes under accumulating flag constraints → walk to the FINAL scene →
+  play it → fade → repeat. Island state (tide, position, raft, holiday) is
+  computed ONCE per episode from the FINAL scene's flags.
+- `grUpdateDisplay` is called **every iteration** of the ADS main loop
+  (`ads.go:771`), not only on iterations where a thread drew. A port that
+  composites only when a scene draws freezes all island animation during the long
+  PURGE-loop holds that dominate idle scenes.
+- But that present happens BEFORE the reap step. Presenting again *after*
+  `tick()` returns re-composites the same iteration with a just-freed layer
+  missing — a one-frame blank. See the reap/display rule under "Engine rules".
+
+## Assets loaded by ENGINE CODE, not by any TTM
+
+`island.go` loads `BACKGRND.BMP` (island, palm, shore waves, clouds),
+`MRAFT.BMP` (5 raft stages), `HOLIDAY.BMP` (4 decorations) and one of
+`OCEAN0{0,1,2}.SCR` / `NIGHT.SCR` directly. **No TTM references them**, so an
+extractor that walks LOAD_IMAGE/LOAD_SCREEN opcodes will never see them. Same for
+`resources/*.wav` (sound effects), which are repo files embedded by the Go build
+and are NOT in RESOURCE.001. Any asset pipeline needs an explicit list for these.
+
+- The ocean backdrops are full 640x480 (unlike ISLETEMP.SCR's 640x350).
+- `OCEAN0n.SCR` genuinely contains ~10k magenta (`a8,00,a8`) pixels at y>=272,
+  where the island normally covers them. `grLoadScreen` draws SCRs opaque, so the
+  engine shows them too — it is original artwork, not a transparency-key bug.
+- Sound ids 11 and 13 have no WAV in any release (sound.go marks them "missing").
+  GJCATCH2.TTM plays 11; the engine warns and continues.
+- TTM opcode `PLAY_SAMPLE` (0xC051) is NOT traced by ttm.go — it only
+  debug-prints. Adding a trace line on one side alone desynchronises every scene
+  in the draw-call oracle. Sound is therefore outside oracle coverage; closing
+  that gap means adding the line to BOTH engines.
 
 ## Persistent scenery — the saved-zones layer (COPY_ZONE_TO_BG)
 
