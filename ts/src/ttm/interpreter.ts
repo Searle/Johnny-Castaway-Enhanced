@@ -402,6 +402,15 @@ export class TtmThread {
   static traceReachedBudget = false;
   // Screensaver mode: the island owns the background surface, so scene
   // LOAD_SCREENs must not replace it. See the LOAD_SCREEN case below.
+  //
+  // RE-TESTED after the fixed-slot compositor landed (RESTRUCTURE-PLAN Step 3
+  // asks whether Step 1 made this redundant). It did NOT, and the flag is
+  // load-bearing — measured by flipping it, not inferred: with it disabled,
+  // 74/74 samples showed a BLACK strip below y=400, because a scene's
+  // ISLETEMP.SCR (640x350) replaced the island's full-height 640x480 ocean
+  // backdrop. With it on, that strip is 50.3% non-black in 74/74 samples.
+  // Slots fixed the Z-ORDER; they cannot fix which BITMAP is installed, and
+  // this port still uses a baked ISLETEMP the engine has no equivalent for.
   static keepBackground = false;
 
   // execOne executes a single opcode, advancing ip. Returns true if it was

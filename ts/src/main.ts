@@ -83,6 +83,9 @@ let story: {
 // Engine time consumed by the walk frame just drawn, so the pump can charge the
 // island metronomes the same way a scheduler tick charges `mini`.
 let walkCost = 1;
+// The scene a walk is heading to, for the HUD only. Non-null exactly while
+// playWalk is running.
+let walkTarget: StoryScene | null = null;
 // The running driver. One coroutine, parked at exactly one statement.
 let storyCo: AsyncGenerator<StoryStep, void, void> | null = null;
 // Set while a `yield "load"` is being awaited, so the pump does not re-enter.
@@ -100,6 +103,7 @@ function stopPlayback() {
   scheduler = null;
   story = null;
   storyCo = null;
+  walkTarget = null;
   // Drops the SCENE layers only. The island, clouds and holiday are fixed
   // compositor slots (Step 1); they are released explicitly below.
   renderer.resetLayers();
@@ -342,7 +346,6 @@ async function* storyPlay(): AsyncGenerator<StoryStep, void, void> {
 
     for (const scene of episode) {
       if (!story) return;
-      story.current = scene;
 
       // story.go:207 — ttmDx is set to the DESTINATION scene's offset BEFORE
       // the walk to it, so a walk crossing between the island's LEFT_ISLAND and
@@ -351,6 +354,12 @@ async function* storyPlay(): AsyncGenerator<StoryStep, void, void> {
         yield* playWalk(prevSpot, prevHdg, scene);
         if (!story) return;
       }
+      // Set AFTER the walk: `current` is what the HUD names, and naming the
+      // destination while still walking to it made the HUD read
+      // "tag 7 -> walking -> tag 7", which looks like a scene change with no
+      // walk. playWalk takes its destination as an argument, so it never needed
+      // this to be set early.
+      story.current = scene;
 
       // The story-beat sting that marks a day-specific event.
       if (scene.dayNo !== 0) soundPlayer.play(17);
@@ -397,21 +406,28 @@ async function* playWalk(
   }
   const w = new Walk(from, fromHdg, to.spotStart, to.hdgStart, Math.random);
   frames = 0;
+  walkTarget = to;
   markReady();
 
-  for (;;) {
-    const f = w.step();
-    if (!f) return; // walkAnimate returned delay 0 — the walk is over
-    layer.clear();
-    const img = sheet.frames[f.spriteNo];
-    if (img) layer.drawSprite(img, f.x, f.y, f.flip);
-    // Walking behind the palm: redraw trunk + leaves ON TOP of Johnny, as
-    // walkAnimate does.
-    if (f.behindTree && story?.island) story.island.drawPalmOver(layer);
-    frames++;
-    walkCost = Math.max(1, f.delay);
-    yield "tick";
-    if (!story) return;
+  try {
+    for (;;) {
+      const f = w.step();
+      if (!f) return; // walkAnimate returned delay 0 — the walk is over
+      layer.clear();
+      const img = sheet.frames[f.spriteNo];
+      if (img) layer.drawSprite(img, f.x, f.y, f.flip);
+      // Walking behind the palm: redraw trunk + leaves ON TOP of Johnny, as
+      // walkAnimate does.
+      if (f.behindTree && story?.island) story.island.drawPalmOver(layer);
+      frames++;
+      walkCost = Math.max(1, f.delay);
+      yield "tick";
+      if (!story) return;
+    }
+  } finally {
+    // Cleared on EVERY exit — normal end, story teardown, or an abandoned
+    // coroutine — so the HUD can never be left announcing a walk that is over.
+    walkTarget = null;
   }
 }
 
@@ -996,7 +1012,11 @@ async function main() {
     } else if (story) {
       const s = story.current;
       const day = story.driver.currentDay;
-      const what = !scheduler && s ? `walking → ${s.adsName}` : s ? `${s.adsName} tag ${s.adsTag}` : "starting…";
+      const what = walkTarget
+        ? `walking → ${walkTarget.adsName}`
+        : s
+          ? `${s.adsName} tag ${s.adsTag}`
+          : "starting…";
       hud.textContent = `screensaver — day ${day} — ${what} — frame ${frames}`;
     } else if (scheduler) {
       hud.textContent = `${adsSelect.value} — ${scheduler.runningCount} scene(s) — frame ${frames}${scheduler.isStopped ? " (stopped)" : ""}`;
